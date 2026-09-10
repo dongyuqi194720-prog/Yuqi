@@ -837,14 +837,23 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
                         pos += 1
                     if pos >= len(json_text):
                         break
-                    item, end = decoder.raw_decode(json_text, pos)
+                    try:
+                        item, end = decoder.raw_decode(json_text, pos)
+                    except Exception:
+                        # V6.29-R3.3-E：若前面已有完整 JSON，
+                        # 忽略后续被截断的 JSON，保留已解析 ACTION。
+                        if items:
+                            break
+                        raise
+
                     items.append(item)
                     pos = end
 
-                    # 允许连续 JSON 对象之间存在逗号。
+                    # V6.29-R3.3-D：允许 Qwen 连续 JSON 对象之间出现
+                    # 空白、逗号或 `>` 分隔符。
                     while pos < len(json_text) and json_text[pos].isspace():
                         pos += 1
-                    if pos < len(json_text) and json_text[pos] == ",":
+                    if pos < len(json_text) and json_text[pos] in ",>":
                         pos += 1
                 if items:
                     data = items
@@ -888,8 +897,33 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
         except Exception:
             pass
 
+        # V6.29-R3.3-G：
+        # LLM 输出可能在 JSON 尾部被截断，例如：
+        # {"ACTION":"BROWSER_STATE","ARGS":"...","REASON":"...
+        # 此时标准 json.loads 无法解析，而旧 fallback 只支持
+        # ACTION: BROWSER_STATE 这种文本协议，导致合法 ACTION 丢失。
+        #
+        # 这里仅恢复 JSON 中已经明确出现的字段，不放宽安全白名单。
+        json_action_match = re.search(
+            r'"ACTION"\s*:\s*"([A-Z_]+)"',
+            text,
+            re.I
+        )
+
+        json_args_match = re.search(
+            r'"ARGS"\s*:\s*"((?:\\.|[^"\\])*)',
+            text,
+            re.I
+        )
+
+        json_reason_match = re.search(
+            r'"REASON"\s*:\s*"((?:\\.|[^"\\])*)',
+            text,
+            re.I
+        )
+
         action_match = re.search(
-            r"^\s*ACTION\s*:\s*([A-Z_]+)",
+            r"^\\s*ACTION\\s*:\\s*([A-Z_]+)",
             text,
             re.I | re.M
         )
@@ -927,19 +961,31 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
         action = (
             action_match.group(1).upper()
             if action_match
-            else ""
+            else (
+                json_action_match.group(1).upper()
+                if json_action_match
+                else ""
+            )
         )
 
         reason = (
             reason_match.group(1).strip()
             if reason_match
-            else ""
+            else (
+                json_reason_match.group(1).strip()
+                if json_reason_match
+                else ""
+            )
         )
 
         args = (
             args_match.group(1).strip()
             if args_match
-            else ""
+            else (
+                json_args_match.group(1).strip()
+                if json_args_match
+                else ""
+            )
         )
 
         next_step_requirement = (
@@ -1190,7 +1236,13 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
         patterns = [
             r"(?:找到|找出|定位|寻找|find|locate)"
             r"\s*[“\"「『]([^”\"」』]+)[”\"」』]"
+            r"\s*(?:文字|文本|字样)?"
             r"\s*(?:并|然后)?\s*(?:点击|单击|按一下|click)",
+
+            r"(?:找到|找出|定位|寻找|find|locate)"
+            r"\s+(.+?)"
+            r"\s*(?:文字|文本|字样)"
+            r"\s*(?:并|然后)\s*(?:点击|单击|按一下|click)",
 
             r"(?:找到|找出|定位|寻找|find|locate)"
             r"\s+(.+?)"
@@ -5883,9 +5935,30 @@ path
 
                     break
 
+                # V6.29-R3.3-F：
+                # 纯 COMPUTER / GUI 任务的非确定性动作完成后，
+                # 必须继续留在 COMPUTER，由下一轮 Decision LLM
+                # 根据真实 GUI 结果决定下一步。
+                if self.is_pure_computer_task(question):
+                    self.state["deterministic_computer_consumed"] = False
+                    self.state["phase"] = "COMPUTER"
+                    self.state["decision_request"] = self.build_decision_request(
+                        observation=(
+                            "COMPUTER 工具已真实执行完成。"
+                            "当前为纯 GUI 任务。"
+                            "请根据真实 GUI 执行结果继续决定下一步 ACTION。"
+                            "\\n真实工具执行结果："
+                            + str(result)
+                        )
+                    )
+
+                    print(
+                        "V6.29-R3.3-F PURE COMPUTER → COMPUTER:",
+                        "continue Decision LLM"
+                    )
+                    continue
+
                 # 非确定性 COMPUTER 任务保持 V6.28.2 原行为。
-                # 清除一次性解析锁，允许未来新的 COMPUTER step
-                # 再次解析新的显式桌面命令。
                 self.state["deterministic_computer_consumed"] = False
 
                 self.state["phase"] = self.state.get(
@@ -5893,13 +5966,11 @@ path
                     "ANALYZE"
                 )
 
-                self.state["decision_request"] = (
-                    self.build_decision_request(
-                        observation=(
-                            "COMPUTER 工具已真实执行完成。"
-                            "确定性动作队列已经全部执行。"
-                            "请根据真实执行结果继续决定下一步 ACTION。"
-                        )
+                self.state["decision_request"] = self.build_decision_request(
+                    observation=(
+                        "COMPUTER 工具已真实执行完成。"
+                        "确定性动作队列已经全部执行。"
+                        "请根据真实执行结果继续决定下一步 ACTION。"
                     )
                 )
 
