@@ -1,0 +1,15 @@
+import subprocess
+
+
+def observe_text(image_path, language="chi_sim+eng"):
+    result = subprocess.run(
+        ["tesseract", str(image_path), "stdout", "-l", language],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+if __name__ == "__main__":
+    print(observe_text("/tmp/v6_window.png"))

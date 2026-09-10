@@ -6,6 +6,16 @@ CODEX = os.path.expanduser(
     "~/.vscode/extensions/openai.chatgpt-26.810.52044-linux-arm64/bin/linux-aarch64/codex"
 )
 
+# V6.29-R1-T1：
+# Codex CLI 不存在时跳过该测试，避免 pytest collection 失败。
+if not os.path.isfile(CODEX) or not os.access(CODEX, os.X_OK):
+    import pytest
+    pytest.skip(
+        "Codex CLI not installed: " + CODEX,
+        allow_module_level=True
+    )
+
+
 
 env = os.environ.copy()
 

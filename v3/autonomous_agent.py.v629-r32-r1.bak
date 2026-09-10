@@ -1154,83 +1154,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
         )
 
 
-    def local_text_click_action(self, question):
-        """V6.29-R3.3-C：明确文字目标点击优先本地 OCR。"""
-        import re
-
-        text = str(question or "").strip()
-
-        if not text:
-            return None
-
-        if not re.search(
-            r"(?:找到|找出|定位|寻找|find|locate)",
-            text,
-            re.IGNORECASE
-        ):
-            return None
-
-        if not re.search(
-            r"(?:点击|单击|按一下|click)",
-            text,
-            re.IGNORECASE
-        ):
-            return None
-
-        # 坐标点击由 V6.28 deterministic_computer_action 处理。
-        if re.search(
-            r"(?:坐标|位置)\s*[\(（]?\s*\d+\s*[,，\s]\s*\d+",
-            text,
-            re.IGNORECASE
-        ):
-            return None
-
-        target = None
-
-        patterns = [
-            r"(?:找到|找出|定位|寻找|find|locate)"
-            r"\s*[“\"「『]([^”\"」』]+)[”\"」』]"
-            r"\s*(?:并|然后)?\s*(?:点击|单击|按一下|click)",
-
-            r"(?:找到|找出|定位|寻找|find|locate)"
-            r"\s+(.+?)"
-            r"\s*(?:并|然后)\s*(?:点击|单击|按一下|click)",
-        ]
-
-        for pattern in patterns:
-            match = re.search(
-                pattern,
-                text,
-                re.IGNORECASE
-            )
-
-            if match:
-                candidate = match.group(1).strip()
-                if candidate:
-                    target = candidate
-                    break
-
-        if not target:
-            return None
-
-        target = re.sub(
-            r"\s*(?:按钮|入口|链接)\s*$",
-            "",
-            target,
-            flags=re.IGNORECASE
-        ).strip()
-
-        if not target or len(target) > 80:
-            return None
-
-        return {
-            "TASK_CONTROL": "CONTINUE_STEP",
-            "ACTION": "CLICK_TEXT_LOCAL",
-            "ARGS": target,
-            "REASON": "明确文字目标，优先本地 OCR bbox 点击",
-            "ACTIONS": [],
-        }
-
     def deterministic_computer_action(self, question):
         """V6.28: parse explicit desktop instructions without a Decision LLM.
 
@@ -2334,8 +2257,7 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
                 "browser_state",
                 "browser_text_tool",
                 "browser_elements_tool",
-                "browser_click_text_tool",
-                "click_text_local"
+                "browser_click_text_tool"
             ],
 
             "SUMMARY": []
@@ -5031,41 +4953,6 @@ path
                     )
                 )
 
-            # V6.29-R3.3-C：
-            # 明确“找到文字目标并点击”时，优先本地 OCR bbox。
-            deterministic_local_click = None
-
-            if (
-                queued_action is None
-                and self.state.get("phase") == "COMPUTER"
-                and not self.state.get(
-                    "deterministic_computer_consumed",
-                    False
-                )
-            ):
-                deterministic_local_click = (
-                    self.local_text_click_action(question)
-                )
-
-                if deterministic_local_click:
-                    self.state["deterministic_local_click"] = True
-                    self.state["deterministic_local_click_failed"] = False
-                    self.state["deterministic_computer_consumed"] = True
-
-                    response = json.dumps(
-                        deterministic_local_click,
-                        ensure_ascii=False
-                    )
-                    prompt = ""
-
-                    print(
-                        "V6.29-R3.3-C LOCAL TEXT CLICK →",
-                        deterministic_local_click.get(
-                            "ARGS",
-                            ""
-                        )
-                    )
-
             # V6.28：显式桌面命令直接执行，禁止进入 Decision LLM。
             deterministic_computer = None
             if (
@@ -5125,9 +5012,6 @@ path
             if queued_action is not None:
                 # 确定性动作已经生成，禁止再次调用 LLM。
                 pass
-            elif deterministic_local_click:
-                # V6.29-R3.3-C：本地 OCR 点击已经确定。
-                pass
             elif deterministic_computer:
                 # V6.28：显式桌面命令已确定，禁止再次调用 Decision LLM。
                 pass
@@ -5162,33 +5046,7 @@ path
             # GPT Decision Protocol。
             # 如果外部提供 GPT ACTION，则先经过 V6 安全验证。
             # 当前不改变既有状态机执行逻辑。
-            if deterministic_local_click:
-                decision = {
-                    "allowed": True,
-                    "action": "CLICK_TEXT_LOCAL",
-                    "args": str(
-                        deterministic_local_click.get(
-                            "ARGS",
-                            ""
-                        )
-                    ).strip(),
-                    "task_control": "CONTINUE_STEP",
-                    "reason": str(
-                        deterministic_local_click.get(
-                            "REASON",
-                            ""
-                        )
-                    ),
-                    "actions": [],
-                }
-
-                print(
-                    "V6.29-R3.3-C LOCAL CLICK decision DIRECT →",
-                    decision["args"],
-                    "skip Decision LLM"
-                )
-
-            elif deterministic_computer:
+            if deterministic_computer:
                 # V6.28.3：
                 # 当前任务由用户的显式 COMPUTER 指令完全确定。
                 # 例如：点击坐标 -> 输入文本 -> 按回车。
@@ -5353,7 +5211,6 @@ path
                 "BROWSER_TEXT": "browser_text_tool",
                 "BROWSER_ELEMENTS": "browser_elements_tool",
                 "BROWSER_CLICK_TEXT": "browser_click_text_tool",
-                "CLICK_TEXT_LOCAL": "click_text_local",
             }
 
             decision_action = str(
@@ -5777,8 +5634,7 @@ path
                 "browser_state",
                 "browser_text_tool",
                 "browser_elements_tool",
-                "browser_click_text_tool",
-                "click_text_local"
+                "browser_click_text_tool"
             }
 
             if tool in computer_tool_names:
@@ -5793,13 +5649,6 @@ path
                 # V6.28.3：
                 # 确定性 COMPUTER 任务只有在每一个真实工具调用
                 # 都返回有效结果后才能直接完成。
-                if self.state.get("deterministic_local_click"):
-                    if result is None:
-                        self.state["deterministic_local_click_failed"] = True
-                        print(
-                            "V6.29-R3.3-C LOCAL TEXT CLICK failed"
-                        )
-
                 if self.state.get("deterministic_computer_task"):
                     if result is None:
                         self.state["deterministic_computer_failed"] = True
@@ -5858,27 +5707,6 @@ path
                     print(
                         "V6.28.3 COMPUTER actions finished:",
                         "no further LLM"
-                    )
-
-                    break
-
-                # V6.29-R3.3-C：
-                # 本地文字点击成功后，纯 COMPUTER 任务直接完成。
-                if (
-                    self.state.get("deterministic_local_click")
-                    and not self.state.get(
-                        "deterministic_local_click_failed"
-                    )
-                    and self.is_pure_computer_task(question)
-                ):
-                    self.state["task_complete"] = True
-                    self.state["task_completed"] = True
-                    self.state["deterministic_computer_consumed"] = False
-                    self.state["phase"] = "SUMMARY"
-
-                    print(
-                        "V6.29-R3.3-C LOCAL TEXT CLICK COMPLETE:",
-                        "no Decision LLM"
                     )
 
                     break

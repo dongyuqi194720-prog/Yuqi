@@ -685,21 +685,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
 
             try:
 
-                # V6.29-R1：真实 LLM 调用入口。
-                # 只有执行到 llm.invoke()，才算真正发生一次模型调用。
-                llm_kind = (
-                    "decision"
-                    if llm is self.decision_llm
-                    else "analysis"
-                )
-
-                print(
-                    "V6.29 REAL LLM INVOKE:",
-                    llm_kind,
-                    "input_chars =",
-                    len(str(prompt))
-                )
-
                 response = llm.invoke(
                     prompt
                 )
@@ -1069,167 +1054,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             indent=2
         )
 
-
-    def is_pure_computer_task(self, question):
-        """
-        V6.29-R2：
-        判断当前任务是否为纯 COMPUTER / GUI 任务。
-
-        只有纯桌面操作才能在 COMPUTER Queue 清空后直接完成。
-        如果任务同时包含代码、文件、测试、验证、开发等要求，
-        COMPUTER 完成后必须继续原任务状态机。
-        """
-
-        text = str(question or "").strip().lower()
-
-        if not text:
-            return False
-
-        # 开发类要求一律禁止 COMPUTER 直接结束整个任务。
-        development_keywords = [
-            "修改代码",
-            "修改文件",
-            "编辑代码",
-            "编辑文件",
-            "写代码",
-            "写入文件",
-            "创建文件",
-            "删除文件",
-            "代码",
-            "源码",
-            "文件",
-            "程序",
-            "脚本",
-            "测试",
-            "运行测试",
-            "pytest",
-            "单元测试",
-            "编译",
-            "修复",
-            "bug",
-            "报错",
-            "错误",
-            "验证代码",
-            "git",
-            "commit",
-            "提交",
-            "开发",
-            "实现",
-        ]
-
-        if any(
-            keyword in text
-            for keyword in development_keywords
-        ):
-            return False
-
-        # 必须明确存在 COMPUTER / GUI 操作意图。
-        computer_keywords = [
-            "点击",
-            "鼠标",
-            "输入",
-            "键入",
-            "按键",
-            "按回车",
-            "回车",
-            "打开浏览器",
-            "浏览器",
-            "窗口",
-            "拖动",
-            "双击",
-            "右键",
-            "滚动",
-            "keyboard",
-            "mouse",
-            "click",
-            "type",
-            "press",
-            "browser",
-            "window",
-        ]
-
-        return any(
-            keyword in text
-            for keyword in computer_keywords
-        )
-
-
-    def local_text_click_action(self, question):
-        """V6.29-R3.3-C：明确文字目标点击优先本地 OCR。"""
-        import re
-
-        text = str(question or "").strip()
-
-        if not text:
-            return None
-
-        if not re.search(
-            r"(?:找到|找出|定位|寻找|find|locate)",
-            text,
-            re.IGNORECASE
-        ):
-            return None
-
-        if not re.search(
-            r"(?:点击|单击|按一下|click)",
-            text,
-            re.IGNORECASE
-        ):
-            return None
-
-        # 坐标点击由 V6.28 deterministic_computer_action 处理。
-        if re.search(
-            r"(?:坐标|位置)\s*[\(（]?\s*\d+\s*[,，\s]\s*\d+",
-            text,
-            re.IGNORECASE
-        ):
-            return None
-
-        target = None
-
-        patterns = [
-            r"(?:找到|找出|定位|寻找|find|locate)"
-            r"\s*[“\"「『]([^”\"」』]+)[”\"」』]"
-            r"\s*(?:并|然后)?\s*(?:点击|单击|按一下|click)",
-
-            r"(?:找到|找出|定位|寻找|find|locate)"
-            r"\s+(.+?)"
-            r"\s*(?:并|然后)\s*(?:点击|单击|按一下|click)",
-        ]
-
-        for pattern in patterns:
-            match = re.search(
-                pattern,
-                text,
-                re.IGNORECASE
-            )
-
-            if match:
-                candidate = match.group(1).strip()
-                if candidate:
-                    target = candidate
-                    break
-
-        if not target:
-            return None
-
-        target = re.sub(
-            r"\s*(?:按钮|入口|链接)\s*$",
-            "",
-            target,
-            flags=re.IGNORECASE
-        ).strip()
-
-        if not target or len(target) > 80:
-            return None
-
-        return {
-            "TASK_CONTROL": "CONTINUE_STEP",
-            "ACTION": "CLICK_TEXT_LOCAL",
-            "ARGS": target,
-            "REASON": "明确文字目标，优先本地 OCR bbox 点击",
-            "ACTIONS": [],
-        }
 
     def deterministic_computer_action(self, question):
         """V6.28: parse explicit desktop instructions without a Decision LLM.
@@ -2334,8 +2158,7 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
                 "browser_state",
                 "browser_text_tool",
                 "browser_elements_tool",
-                "browser_click_text_tool",
-                "click_text_local"
+                "browser_click_text_tool"
             ],
 
             "SUMMARY": []
@@ -5003,68 +4826,11 @@ path
                 print("V6.20 DETERMINISTIC OBSERVE →", target_app)
 
             # V6.12：COMPUTER 动作队列非空时，跳过 LLM，直接执行下一动作。
-            #
-            # V6.28.4：
-            # Queue 中的动作已经在上一轮确定性解析完成。
-            # 当前动作直接进入 computer_tools dispatch，
-            # 不允许再次进入 Decision Layer。
             if queued_action is None and self.state.get("computer_action_queue"):
                 queued_action = self.state["computer_action_queue"].pop(0)
-                response = __import__("json").dumps(
-                    queued_action,
-                    ensure_ascii=False
-                )
+                response = __import__("json").dumps(queued_action, ensure_ascii=False)
                 prompt = ""
-
-                self.state["computer_queue_direct_dispatch"] = True
-
-                print(
-                    "V6.28.5 COMPUTER Queue DIRECT →",
-                    queued_action.get(
-                        "ACTION",
-                        queued_action.get("action", "")
-                    ),
-                    "ARGS=",
-                    queued_action.get(
-                        "ARGS",
-                        queued_action.get("args", "")
-                    )
-                )
-
-            # V6.29-R3.3-C：
-            # 明确“找到文字目标并点击”时，优先本地 OCR bbox。
-            deterministic_local_click = None
-
-            if (
-                queued_action is None
-                and self.state.get("phase") == "COMPUTER"
-                and not self.state.get(
-                    "deterministic_computer_consumed",
-                    False
-                )
-            ):
-                deterministic_local_click = (
-                    self.local_text_click_action(question)
-                )
-
-                if deterministic_local_click:
-                    self.state["deterministic_local_click"] = True
-                    self.state["deterministic_local_click_failed"] = False
-                    self.state["deterministic_computer_consumed"] = True
-
-                    response = json.dumps(
-                        deterministic_local_click,
-                        ensure_ascii=False
-                    )
-                    prompt = ""
-
-                    print(
-                        "V6.29-R3.3-C LOCAL TEXT CLICK →",
-                        deterministic_local_click.get(
-                            "ARGS",
-                            ""
-                        )
-                    )
+                print("V6.12 COMPUTER Queue →", response)
 
             # V6.28：显式桌面命令直接执行，禁止进入 Decision LLM。
             deterministic_computer = None
@@ -5125,9 +4891,6 @@ path
             if queued_action is not None:
                 # 确定性动作已经生成，禁止再次调用 LLM。
                 pass
-            elif deterministic_local_click:
-                # V6.29-R3.3-C：本地 OCR 点击已经确定。
-                pass
             elif deterministic_computer:
                 # V6.28：显式桌面命令已确定，禁止再次调用 Decision LLM。
                 pass
@@ -5162,41 +4925,7 @@ path
             # GPT Decision Protocol。
             # 如果外部提供 GPT ACTION，则先经过 V6 安全验证。
             # 当前不改变既有状态机执行逻辑。
-            if deterministic_local_click:
-                decision = {
-                    "allowed": True,
-                    "action": "CLICK_TEXT_LOCAL",
-                    "args": str(
-                        deterministic_local_click.get(
-                            "ARGS",
-                            ""
-                        )
-                    ).strip(),
-                    "task_control": "CONTINUE_STEP",
-                    "reason": str(
-                        deterministic_local_click.get(
-                            "REASON",
-                            ""
-                        )
-                    ),
-                    "actions": [],
-                }
-
-                print(
-                    "V6.29-R3.3-C LOCAL CLICK decision DIRECT →",
-                    decision["args"],
-                    "skip Decision LLM"
-                )
-
-            elif deterministic_computer:
-                # V6.28.3：
-                # 当前任务由用户的显式 COMPUTER 指令完全确定。
-                # 例如：点击坐标 -> 输入文本 -> 按回车。
-                # 这类任务完成动作队列后直接结束，不再进入
-                # ANALYZE / VERIFY / Decision LLM。
-                self.state["deterministic_computer_task"] = True
-                self.state["deterministic_computer_failed"] = False
-
+            if deterministic_computer:
                 decision = {
                     "allowed": True,
                     "action": deterministic_computer.get("ACTION", ""),
@@ -5204,73 +4933,6 @@ path
                     "task_control": deterministic_computer.get("TASK_CONTROL", "CONTINUE_STEP"),
                     "actions": deterministic_computer.get("ACTIONS", [])
                 }
-
-            # V6.28.4：
-            # Queue 后续动作已经确定，直接构造 decision。
-            # 这里是 Queue 与统一 computer_tools dispatch 的桥接点。
-            # 绝不能落入 decision_step()。
-            elif queued_action is not None:
-                decision = {
-                    "allowed": True,
-                    "action": str(
-                        queued_action.get(
-                            "ACTION",
-                            queued_action.get("action", "")
-                        )
-                    ).strip().upper(),
-                    "args": str(
-                        queued_action.get(
-                            "ARGS",
-                            queued_action.get("args", "")
-                        )
-                    ).strip(),
-                    "task_control": str(
-                        queued_action.get(
-                            "TASK_CONTROL",
-                            queued_action.get(
-                                "task_control",
-                                "CONTINUE_STEP"
-                            )
-                        )
-                    ).strip().upper(),
-                    "reason": str(
-                        queued_action.get(
-                            "REASON",
-                            queued_action.get("reason", "")
-                        )
-                    ),
-                    "actions": [
-                        {
-                            "ACTION": str(
-                                queued_action.get(
-                                    "ACTION",
-                                    queued_action.get("action", "")
-                                )
-                            ).strip().upper(),
-                            "ARGS": str(
-                                queued_action.get(
-                                    "ARGS",
-                                    queued_action.get("args", "")
-                                )
-                            ).strip(),
-                            "REASON": str(
-                                queued_action.get(
-                                    "REASON",
-                                    queued_action.get("reason", "")
-                                )
-                            )
-                        }
-                    ]
-                }
-
-                print(
-                    "V6.28.5 COMPUTER Queue decision DIRECT →",
-                    decision["action"],
-                    "ARGS=",
-                    decision["args"],
-                    "skip Decision LLM"
-                )
-
             elif deterministic_search:
                 decision = {
                     "allowed": True,
@@ -5335,7 +4997,7 @@ path
             )
 
             print(
-                "V6.28.6 Decision:",
+                "V6.6 Decision:",
                 decision
             )
 
@@ -5353,7 +5015,6 @@ path
                 "BROWSER_TEXT": "browser_text_tool",
                 "BROWSER_ELEMENTS": "browser_elements_tool",
                 "BROWSER_CLICK_TEXT": "browser_click_text_tool",
-                "CLICK_TEXT_LOCAL": "click_text_local",
             }
 
             decision_action = str(
@@ -5777,35 +5438,12 @@ path
                 "browser_state",
                 "browser_text_tool",
                 "browser_elements_tool",
-                "browser_click_text_tool",
-                "click_text_local"
+                "browser_click_text_tool"
             }
 
             if tool in computer_tool_names:
 
                 self.state["previous_step_result"] = str(result)
-
-                # V6.28.4：
-                # 当前 Queue direct-dispatch 已完成。
-                # 标记只属于当前一次 dispatch，立即清除。
-                self.state["computer_queue_direct_dispatch"] = False
-
-                # V6.28.3：
-                # 确定性 COMPUTER 任务只有在每一个真实工具调用
-                # 都返回有效结果后才能直接完成。
-                if self.state.get("deterministic_local_click"):
-                    if result is None:
-                        self.state["deterministic_local_click_failed"] = True
-                        print(
-                            "V6.29-R3.3-C LOCAL TEXT CLICK failed"
-                        )
-
-                if self.state.get("deterministic_computer_task"):
-                    if result is None:
-                        self.state["deterministic_computer_failed"] = True
-                        print(
-                            "V6.28.3 COMPUTER deterministic action failed"
-                        )
 
                 # V6.28.2：
                 # 确定性 COMPUTER 动作队列必须连续执行。
@@ -5813,77 +5451,13 @@ path
                 if self.state.get("computer_action_queue"):
                     self.state["phase"] = "COMPUTER"
                     print(
-                        "V6.28.6 COMPUTER Queue remaining →",
+                        "V6.28.2 COMPUTER Queue remaining →",
                         len(self.state["computer_action_queue"]),
-                        "actions, direct dispatch, skip Decision Layer"
+                        "actions, skip LLM"
                     )
                     continue
 
-                # 当前 COMPUTER 动作序列已经全部执行完毕。
-                #
-                # V6.28.3：
-                # 如果整个任务本身就是用户明确给出的确定性 COMPUTER
-                # 动作序列，那么这里已经达到任务完成条件。
-                #
-                # 例如：
-                #   点击坐标 -> 输入文本 -> Enter
-                #
-                # 不再：
-                #   COMPUTER -> ANALYZE -> VERIFY -> LLM
-                #
-                # 这样可以保证确定性 GUI 指令真正做到零额外 LLM。
-                if (
-                    self.state.get("deterministic_computer_task")
-                    and not self.state.get("deterministic_computer_failed")
-                    and self.is_pure_computer_task(question)
-                ):
-                    self.state["deterministic_computer_consumed"] = False
-                    self.state["task_complete"] = True
-                    self.state["task_completed"] = True
-                    self.state["phase"] = "SUMMARY"
-
-                    self.state["decision_request"] = (
-                        self.build_decision_request(
-                            observation=(
-                                "COMPUTER 确定性动作序列已经全部真实执行成功。"
-                                "用户显式要求的桌面动作已经完成。"
-                                "无需继续分析项目或调用 LLM。"
-                            )
-                        )
-                    )
-
-                    print(
-                        "V6.28.3 COMPUTER deterministic task COMPLETE"
-                    )
-                    print(
-                        "V6.28.3 COMPUTER actions finished:",
-                        "no further LLM"
-                    )
-
-                    break
-
-                # V6.29-R3.3-C：
-                # 本地文字点击成功后，纯 COMPUTER 任务直接完成。
-                if (
-                    self.state.get("deterministic_local_click")
-                    and not self.state.get(
-                        "deterministic_local_click_failed"
-                    )
-                    and self.is_pure_computer_task(question)
-                ):
-                    self.state["task_complete"] = True
-                    self.state["task_completed"] = True
-                    self.state["deterministic_computer_consumed"] = False
-                    self.state["phase"] = "SUMMARY"
-
-                    print(
-                        "V6.29-R3.3-C LOCAL TEXT CLICK COMPLETE:",
-                        "no Decision LLM"
-                    )
-
-                    break
-
-                # 非确定性 COMPUTER 任务保持 V6.28.2 原行为。
+                # 当前确定性动作序列已经全部执行完毕。
                 # 清除一次性解析锁，允许未来新的 COMPUTER step
                 # 再次解析新的显式桌面命令。
                 self.state["deterministic_computer_consumed"] = False

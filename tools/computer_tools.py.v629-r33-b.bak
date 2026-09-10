@@ -1,10 +1,8 @@
 from langchain_core.tools import tool
 import os
 import subprocess
-from pathlib import Path
 from tools.gui_observer import observe_window
 from tools.vision_gateway import vision_observe
-from tools.ocr_observer import observe_text_boxes
 
 
 @tool
@@ -267,142 +265,6 @@ def window_activate(window_id: str):
 
     except Exception as e:
         return f"窗口激活失败: {e}"
-
-
-@tool
-def click_text_local(target: str, window_query: str = "Chromium"):
-    """
-    V6.29-R3.3-B：
-    本地 OCR 文字定位 → 窗口坐标转换 → 桌面绝对坐标点击。
-
-    不调用 GPT。
-    截图只作为本地临时计算工件，完成后立即删除。
-    """
-    screenshot = None
-
-    try:
-        target = str(target).strip()
-        window_query = str(window_query).strip() or "Chromium"
-
-        if not target:
-            return "CLICK_TEXT_LOCAL_FAILED: empty target"
-
-        window = observe_window(window_query)
-
-        if not window:
-            return (
-                "CLICK_TEXT_LOCAL_FAILED: "
-                f"window not found: {window_query}"
-            )
-
-        screenshot = window.get("screenshot")
-
-        if not screenshot or not Path(screenshot).exists():
-            return "CLICK_TEXT_LOCAL_FAILED: screenshot unavailable"
-
-        boxes = observe_text_boxes(screenshot)
-
-        target_lower = target.lower()
-
-        # 精确匹配优先
-        matches = [
-            box for box in boxes
-            if str(box.get("text", "")).strip().lower()
-            == target_lower
-        ]
-
-        # 子串匹配 fallback
-        if not matches:
-            matches = [
-                box for box in boxes
-                if target_lower in str(
-                    box.get("text", "")
-                ).strip().lower()
-            ]
-
-        if not matches:
-            return (
-                "CLICK_TEXT_LOCAL_NOT_FOUND: "
-                f"target={target}"
-            )
-
-        box = matches[0]
-
-        local_x = int(box["center_x"])
-        local_y = int(box["center_y"])
-
-        window_x = int(window.get("x", 0))
-        window_y = int(window.get("y", 0))
-
-        desktop_x = window_x + local_x
-        desktop_y = window_y + local_y
-
-        print(
-            "V6.29-R3.3-B LOCAL TEXT CLICK:",
-            "target=",
-            target,
-            "local=",
-            f"({local_x},{local_y})",
-            "window=",
-            f"({window_x},{window_y})",
-            "desktop=",
-            f"({desktop_x},{desktop_y})",
-            "confidence=",
-            box.get("confidence"),
-        )
-
-        result = subprocess.run(
-            [
-                "xdotool",
-                "mousemove",
-                str(desktop_x),
-                str(desktop_y),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-        if result.returncode != 0:
-            return (
-                "CLICK_TEXT_LOCAL_FAILED: "
-                f"mousemove: {result.stderr.strip()}"
-            )
-
-        result = subprocess.run(
-            [
-                "xdotool",
-                "click",
-                "1",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-        if result.returncode != 0:
-            return (
-                "CLICK_TEXT_LOCAL_FAILED: "
-                f"click: {result.stderr.strip()}"
-            )
-
-        return (
-            "CLICK_TEXT_LOCAL_OK: "
-            f"target={target}; "
-            f"local=({local_x},{local_y}); "
-            f"desktop=({desktop_x},{desktop_y}); "
-            f"confidence={box.get('confidence')}"
-        )
-
-    except Exception as e:
-        return f"CLICK_TEXT_LOCAL_FAILED: {e}"
-
-    finally:
-        if screenshot:
-            try:
-                Path(screenshot).unlink()
-            except OSError:
-                pass
 
 
 @tool

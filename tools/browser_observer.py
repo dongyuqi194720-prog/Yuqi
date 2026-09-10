@@ -178,3 +178,41 @@ def browser_click_text_tool(text: str):
     按当前 Chromium 页面上的可见文字点击元素。
     """
     return browser_click_text(text)
+
+
+def browser_navigate(url):
+    """通过 Chromium CDP 直接导航；不需要 LLM。"""
+    url = str(url).strip()
+    if not url:
+        return False
+    page = _page()
+    if not page:
+        return False
+    ws = websocket.create_connection(
+        page["webSocketDebuggerUrl"],
+        timeout=5,
+    )
+    try:
+        ws.send(json.dumps({
+            "id": 1,
+            "method": "Page.navigate",
+            "params": {"url": url},
+        }))
+        result = json.loads(ws.recv())
+        return not result.get("error")
+    finally:
+        ws.close()
+
+
+def browser_search(query, engine="google"):
+    """确定性浏览器搜索：直接构造搜索 URL，不调用 LLM。"""
+    from urllib.parse import quote_plus
+    query = str(query).strip()
+    if not query:
+        return False
+    base = (
+        "https://www.bing.com/search?q="
+        if str(engine).lower() == "bing"
+        else "https://www.google.com/search?q="
+    )
+    return browser_navigate(base + quote_plus(query))

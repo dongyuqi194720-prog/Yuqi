@@ -1,133 +1,9 @@
-import time
 import copy
 import json
 import os
 import re
 
 from ai_agent.codex_bridge import CodexBridge
-
-
-def extract_target_app(question):
-    """从系统 .desktop 文件动态识别桌面目标应用。"""
-    import glob
-    import os
-    from pathlib import Path
-
-    text = str(question)
-    candidates = []
-
-    desktop_files = glob.glob("/usr/share/applications/*.desktop") + glob.glob(
-        os.path.expanduser("~/.local/share/applications/*.desktop")
-    )
-
-    for desktop_file in desktop_files:
-        try:
-            content = Path(desktop_file).read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-
-        section = None
-        names = []
-
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith("["):
-                section = line
-                continue
-            if section != "[Desktop Entry]":
-                continue
-
-            if line.startswith("Name="):
-                names.append(line[5:].strip())
-            elif line.startswith("Name[zh_CN]="):
-                names.append(line[12:].strip())
-
-        for name in names:
-            if name and (name.lower() in text.lower() or any(part.lower() in text.lower() for part in name.split() if len(part) >= 5 and part.lower() not in {"browser", "application"})):
-                candidates.append((len(name), name))
-
-    if not candidates:
-        return None
-
-    candidates.sort(reverse=True)
-    return candidates[0][1]
-
-
-def launch_target_app(app_name):
-    """通过 .desktop 主入口启动目标桌面应用，并确认窗口出现。"""
-    import glob
-    import shlex
-    import subprocess
-    import time
-
-    desktop_files = glob.glob("/usr/share/applications/*.desktop") + glob.glob(
-        os.path.expanduser("~/.local/share/applications/*.desktop")
-    )
-
-    for desktop_file in desktop_files:
-        try:
-            content = open(
-                desktop_file, encoding="utf-8", errors="ignore"
-            ).read()
-        except OSError:
-            continue
-
-        section = None
-        name = None
-        exec_line = None
-
-        for line in content.splitlines():
-            line = line.strip()
-
-            if line.startswith("["):
-                section = line
-                continue
-
-            if section != "[Desktop Entry]":
-                continue
-
-            if line.startswith("Name="):
-                name = line[5:].strip()
-            elif line.startswith("Exec="):
-                exec_line = line[5:].strip()
-
-        if (
-            not name
-            or app_name.lower() not in name.lower()
-            or not exec_line
-        ):
-            continue
-
-        command = [
-            arg for arg in shlex.split(exec_line)
-            if arg not in ("%u", "%U", "%f", "%F", "%i", "%c", "%k")
-        ]
-
-        if not command:
-            return False
-
-        subprocess.Popen(command)
-        from tools.gui_observer import list_windows
-
-        executable = os.path.basename(command[0]).lower()
-
-        for _ in range(20):
-            for window in list_windows():
-                title = window["title"].lower()
-                wm_class = window["wm_class"].lower()
-
-                if (
-                    executable in wm_class
-                    or executable in title
-                    or app_name.lower() in title
-                ):
-                    return window
-
-            time.sleep(0.1)
-
-        return False
-
-    return False
 
 
 class AutonomousAgent:
@@ -171,8 +47,6 @@ class AutonomousAgent:
             "original_task": "",
             "current_step_requirement": "",
             "previous_step_result": "",
-            "modify_required": False,
-            "modify_executed": False,
 
             "phase": "SEARCH",
 
@@ -220,7 +94,6 @@ class AutonomousAgent:
             "task_complete": False,
             "task_progress": "",
             "remaining_requirements": "",
-            "next_step_requirement": "",
             "collaboration_round": 0,
 
             "can_modify": False,
@@ -265,22 +138,6 @@ class AutonomousAgent:
             # 不改变现有 V6.5 状态机。
             "decision_request": "",
             "last_action": "",
-            "computer_action_queue": [],
-            # V6.28.2：显式桌面命令只解析一次，防止队列消费后重复解析。
-            "deterministic_computer_consumed": False,
-            "computer_observe_done": False,
-            "llm_decision_count": 0,
-            # V6.26: 可观测 LLM 计数/耗时。
-            # 统计所有真正发出的模型请求，便于闭环压力测试定位浪费。
-            "llm_stats": {
-                "total_calls": 0,
-                "decision_calls": 0,
-                "analysis_calls": 0,
-                "completion_calls": 0,
-                "total_seconds": 0.0,
-                "calls": [],
-            },
-            "max_llm_decisions": 12,
         }
          
 
@@ -447,42 +304,6 @@ class AutonomousAgent:
         return request
 
 
-    def _record_llm_call(self, kind, elapsed, prompt_chars=0, success=True):
-        """V6.26：统一记录 LLM 调用，不参与业务决策。"""
-        stats = self.state.setdefault("llm_stats", {})
-        for _key in ("total_calls", "decision_calls", "analysis_calls", "completion_calls"):
-            stats.setdefault(_key, 0)
-        stats.setdefault("total_seconds", 0.0)
-        stats.setdefault("calls", [])
-        stats["total_calls"] = int(stats.get("total_calls", 0)) + 1
-        stats["total_seconds"] = float(stats.get("total_seconds", 0.0)) + float(elapsed)
-        key = {
-            "decision": "decision_calls",
-            "analysis": "analysis_calls",
-            "completion": "completion_calls",
-        }.get(str(kind), None)
-        if key:
-            stats[key] = int(stats.get(key, 0)) + 1
-        calls = stats.setdefault("calls", [])
-        calls.append({
-            "kind": str(kind),
-            "seconds": round(float(elapsed), 3),
-            "prompt_chars": int(prompt_chars),
-            "success": bool(success),
-        })
-        # 避免长任务把状态无限膨胀。
-        if len(calls) > 100:
-            del calls[:-100]
-
-    def get_llm_stats(self):
-        """返回当前任务的 LLM 使用统计。"""
-        stats = copy.deepcopy(self.state.get("llm_stats", {}))
-        total = int(stats.get("total_calls", 0))
-        seconds = float(stats.get("total_seconds", 0.0))
-        stats["avg_seconds"] = round(seconds / total, 3) if total else 0.0
-        return stats
-
-
     def check_task_completion(self):
         """
         V6.10：任务级完成判断。
@@ -550,8 +371,6 @@ PROGRESS: 当前已经完成的任务内容
 
 REMAINING: 如果未完成，明确说明还缺少什么；如果已经完成，写 NONE
 
-NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确、可执行的步骤要求；如果 YES，写 NONE
-
 判断规则：
 1. 必须判断“整个用户任务”，不是只判断最近一次修改。
 2. 不能因为最近一次修改成功就自动认为整个任务完成。
@@ -563,23 +382,7 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
 """
 
         # V6.10：任务级完成判断使用真实 GPT。
-        _completion_start = time.time()
-        try:
-            response = self.codex.ask(prompt)
-            self._record_llm_call(
-                "completion",
-                time.time() - _completion_start,
-                len(prompt),
-                True,
-            )
-        except Exception:
-            self._record_llm_call(
-                "completion",
-                time.time() - _completion_start,
-                len(prompt),
-                False,
-            )
-            raise
+        response = self.codex.ask(prompt)
 
         text = str(response).strip()
 
@@ -596,13 +399,7 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
         )
 
         remaining_match = re.search(
-            r"REMAINING\s*:\s*(.+?)(?=\nNEXT_STEP_REQUIREMENT\s*:|$)",
-            text,
-            re.I | re.S
-        )
-
-        next_step_match = re.search(
-            r"NEXT_STEP_REQUIREMENT\s*:\s*(.+)$",
+            r"REMAINING\s*:\s*(.+)$",
             text,
             re.I | re.S
         )
@@ -624,17 +421,10 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             else ""
         )
 
-        next_step_requirement = (
-            next_step_match.group(1).strip()
-            if next_step_match
-            else ""
-        )
-
         return {
             "complete": complete,
             "progress": progress,
             "remaining": remaining,
-            "next_step_requirement": next_step_requirement,
             "raw": text,
         }
 
@@ -685,24 +475,14 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
 
             try:
 
-                # V6.29-R1：真实 LLM 调用入口。
-                # 只有执行到 llm.invoke()，才算真正发生一次模型调用。
-                llm_kind = (
-                    "decision"
-                    if llm is self.decision_llm
-                    else "analysis"
-                )
-
-                print(
-                    "V6.29 REAL LLM INVOKE:",
-                    llm_kind,
-                    "input_chars =",
-                    len(str(prompt))
-                )
-
-                response = llm.invoke(
-                    prompt
-                )
+                if llm is self.llm:
+                    response = self.codex.ask(
+                        prompt
+                    )
+                else:
+                    response = llm.invoke(
+                        prompt
+                    )
 
                 result_queue.put(
                     (
@@ -773,12 +553,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
                 "seconds"
             )
 
-            self._record_llm_call(
-                "decision" if llm is self.decision_llm else "analysis",
-                elapsed,
-                len(str(prompt)),
-                False,
-            )
             raise result
 
         print(
@@ -786,13 +560,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             "elapsed =",
             round(elapsed, 2),
             "seconds"
-        )
-
-        self._record_llm_call(
-            "decision" if llm is self.decision_llm else "analysis",
-            elapsed,
-            len(str(prompt)),
-            True,
         )
 
         if hasattr(
@@ -816,78 +583,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
 
         text = str(response).strip()
 
-        # V6.12: JSON Decision Protocol，支持单动作、多动作数组、连续 JSON 对象。
-        try:
-            json_text = text
-            if json_text.startswith("```"):
-                json_text = re.sub(r"^```(?:json)?\\s*|\\s*```$", "", json_text, flags=re.I | re.S).strip()
-
-            data = None
-
-            # 1. 标准单 JSON / JSON 数组
-            try:
-                data = json.loads(json_text)
-            except Exception:
-                # 2. Qwen 可能连续输出多个 JSON 对象：}{ 或 },{
-                decoder = json.JSONDecoder()
-                pos = 0
-                items = []
-                while pos < len(json_text):
-                    while pos < len(json_text) and json_text[pos].isspace():
-                        pos += 1
-                    if pos >= len(json_text):
-                        break
-                    item, end = decoder.raw_decode(json_text, pos)
-                    items.append(item)
-                    pos = end
-
-                    # 允许连续 JSON 对象之间存在逗号。
-                    while pos < len(json_text) and json_text[pos].isspace():
-                        pos += 1
-                    if pos < len(json_text) and json_text[pos] == ",":
-                        pos += 1
-                if items:
-                    data = items
-
-            if isinstance(data, dict) and "ACTION" in data:
-                actions = [data]
-
-            elif isinstance(data, list):
-                actions = [
-                    item for item in data
-                    if isinstance(item, dict) and "ACTION" in item
-                ]
-
-            else:
-                actions = []
-
-            if actions:
-                first = actions[0]
-                return {
-                    "task_control": str(
-                        first.get("TASK_CONTROL", "CONTINUE_STEP")
-                    ).upper(),
-                    "action": str(
-                        first.get("ACTION", "")
-                    ).upper(),
-                    "args": str(first.get("ARGS", "")),
-                    "reason": str(first.get("REASON", "")),
-                    "next_step_requirement": str(
-                        first.get("NEXT_STEP_REQUIREMENT", "")
-                    ),
-                    "actions": [
-                        {
-                            "action": str(item.get("ACTION", "")).upper(),
-                            "args": str(item.get("ARGS", "")),
-                            "reason": str(item.get("REASON", "")),
-                        }
-                        for item in actions
-                    ],
-                }
-
-        except Exception:
-            pass
-
         action_match = re.search(
             r"^\s*ACTION\s*:\s*([A-Z_]+)",
             text,
@@ -898,30 +593,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             r"^\s*REASON\s*:\s*(.+)$",
             text,
             re.I | re.M
-        )
-
-        control_match = re.search(
-            r"^\s*TASK_CONTROL\s*:\s*(CONTINUE_STEP|NEXT_STEP|DONE)",
-            text,
-            re.I | re.M
-        )
-
-        args_match = re.search(
-            r"^[ \t]*ARGS[ \t]*:[ \t]*([^\r\n]*)$",
-            text,
-            re.I | re.M
-        )
-
-        next_requirement_match = re.search(
-            r"^\s*NEXT_STEP_REQUIREMENT\s*:\s*(.*)$",
-            text,
-            re.I | re.M
-        )
-
-        task_control = (
-            control_match.group(1).upper()
-            if control_match
-            else "CONTINUE_STEP"
         )
 
         action = (
@@ -936,24 +607,9 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             else ""
         )
 
-        args = (
-            args_match.group(1).strip()
-            if args_match
-            else ""
-        )
-
-        next_step_requirement = (
-            next_requirement_match.group(1).strip()
-            if next_requirement_match
-            else ""
-        )
-
         return {
-            "task_control": task_control,
             "action": action,
-            "args": args,
-            "reason": reason,
-            "next_step_requirement": next_step_requirement
+            "reason": reason
         }
 
 
@@ -1001,25 +657,13 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
                 "verify_result_done": state.get("verify_result_done", False),
                 "verify_result_passed": state.get("verify_result_passed", False),
             },
-            "CONTEXT": (
-                state.get("analysis_context", [])
-                if state.get("phase") in {"READ", "ANALYZE", "VERIFY"}
-                else state.get("analysis_result", "")
-                if state.get("phase") == "MODIFY_PLAN"
-                else state.get("modify_plan", "")
-                if state.get("phase") in {"PLAN_VERIFY", "MODIFY"}
-                else state.get("verify_result", "")
-                if state.get("phase") == "VERIFY_RESULT"
-                else ""
-            ),
+            "SOURCE": state.get("analysis_context", []),
+            "ANALYSIS": state.get("analysis_result", ""),
+            "MODIFY_PLAN": state.get("modify_plan", ""),
+            "VERIFY_RESULT": state.get("verify_result", ""),
             "LAST_RESULT": str(observation),
             "DECISION_PROTOCOL": {
-                "task_control": [
-                    "CONTINUE_STEP",
-                    "NEXT_STEP",
-                    "DONE"
-                ],
-                "required_output": "TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>\\nACTION: <ACTION>\\nARGS: <args>\\nREASON: <reason>\\nNEXT_STEP_REQUIREMENT: <requirement>",
+                "required_output": "ACTION: <ACTION>\\nREASON: <reason>",
                 "allowed_actions": [
                     "SEARCH",
                     "READ",
@@ -1031,34 +675,17 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
                     "TEST",
                     "BUILD",
                     "VERIFY_RESULT",
-                    "MOUSE_MOVE",
-                    "MOUSE_CLICK",
-                    "KEYBOARD_TYPE",
-                    "KEYBOARD_PRESS",
-        "WINDOW_ACTIVATE",
-                    "WINDOW_LIST",
-                    "WINDOW_ACTIVATE",
-                    "BROWSER_STATE",
-                    "BROWSER_TEXT",
-                    "BROWSER_ELEMENTS",
-                    "BROWSER_CLICK_TEXT",
                     "DONE",
                     "FINISH"
                 ],
                 "instruction": (
-                    "你现在是 GPT Decision Layer，负责决定当前步骤和整个任务的下一步。"
+                    "你现在是 GPT Decision Layer，只负责决定下一步 ACTION。"
                     "不要输出工具调用，不要输出代码，不要输出解释性正文。"
-                    "必须严格输出五行："
-                    "第一行 TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>"
-                    "第二行 ACTION: <一个允许的 ACTION>"
-                    "第三行 ARGS: <当前 ACTION 所需参数；无需参数时留空>"
-                    "第四行 REASON: <简短原因>"
-                    "第五行 NEXT_STEP_REQUIREMENT: <当 TASK_CONTROL=NEXT_STEP 时必须明确填写下一步骤要求；否则留空>"
-                    "TASK_CONTROL 必须来自 task_control。"
+                    "必须严格输出两行："
+                    "第一行 ACTION: <一个允许的 ACTION>"
+                    "第二行 REASON: <简短原因>"
                     "ACTION 必须来自 allowed_actions。"
-                    "只有当前步骤已经真实验证通过时才能选择 NEXT_STEP。"
-                    "只有 ORIGINAL_TASK 已全部完成且最终真实验证通过时才能选择 DONE。"
-                    "根据 CURRENT_STATE、CURRENT_STEP_REQUIREMENT、PREVIOUS_STEP_RESULT 和 LAST_RESULT 决定。"
+                    "根据 CURRENT_STATE 和 LAST_RESULT 决定下一步动作。"
                 )
             },
         }
@@ -1068,231 +695,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             ensure_ascii=False,
             indent=2
         )
-
-
-    def is_pure_computer_task(self, question):
-        """
-        V6.29-R2：
-        判断当前任务是否为纯 COMPUTER / GUI 任务。
-
-        只有纯桌面操作才能在 COMPUTER Queue 清空后直接完成。
-        如果任务同时包含代码、文件、测试、验证、开发等要求，
-        COMPUTER 完成后必须继续原任务状态机。
-        """
-
-        text = str(question or "").strip().lower()
-
-        if not text:
-            return False
-
-        # 开发类要求一律禁止 COMPUTER 直接结束整个任务。
-        development_keywords = [
-            "修改代码",
-            "修改文件",
-            "编辑代码",
-            "编辑文件",
-            "写代码",
-            "写入文件",
-            "创建文件",
-            "删除文件",
-            "代码",
-            "源码",
-            "文件",
-            "程序",
-            "脚本",
-            "测试",
-            "运行测试",
-            "pytest",
-            "单元测试",
-            "编译",
-            "修复",
-            "bug",
-            "报错",
-            "错误",
-            "验证代码",
-            "git",
-            "commit",
-            "提交",
-            "开发",
-            "实现",
-        ]
-
-        if any(
-            keyword in text
-            for keyword in development_keywords
-        ):
-            return False
-
-        # 必须明确存在 COMPUTER / GUI 操作意图。
-        computer_keywords = [
-            "点击",
-            "鼠标",
-            "输入",
-            "键入",
-            "按键",
-            "按回车",
-            "回车",
-            "打开浏览器",
-            "浏览器",
-            "窗口",
-            "拖动",
-            "双击",
-            "右键",
-            "滚动",
-            "keyboard",
-            "mouse",
-            "click",
-            "type",
-            "press",
-            "browser",
-            "window",
-        ]
-
-        return any(
-            keyword in text
-            for keyword in computer_keywords
-        )
-
-
-    def local_text_click_action(self, question):
-        """V6.29-R3.3-C：明确文字目标点击优先本地 OCR。"""
-        import re
-
-        text = str(question or "").strip()
-
-        if not text:
-            return None
-
-        if not re.search(
-            r"(?:找到|找出|定位|寻找|find|locate)",
-            text,
-            re.IGNORECASE
-        ):
-            return None
-
-        if not re.search(
-            r"(?:点击|单击|按一下|click)",
-            text,
-            re.IGNORECASE
-        ):
-            return None
-
-        # 坐标点击由 V6.28 deterministic_computer_action 处理。
-        if re.search(
-            r"(?:坐标|位置)\s*[\(（]?\s*\d+\s*[,，\s]\s*\d+",
-            text,
-            re.IGNORECASE
-        ):
-            return None
-
-        target = None
-
-        patterns = [
-            r"(?:找到|找出|定位|寻找|find|locate)"
-            r"\s*[“\"「『]([^”\"」』]+)[”\"」』]"
-            r"\s*(?:并|然后)?\s*(?:点击|单击|按一下|click)",
-
-            r"(?:找到|找出|定位|寻找|find|locate)"
-            r"\s+(.+?)"
-            r"\s*(?:并|然后)\s*(?:点击|单击|按一下|click)",
-        ]
-
-        for pattern in patterns:
-            match = re.search(
-                pattern,
-                text,
-                re.IGNORECASE
-            )
-
-            if match:
-                candidate = match.group(1).strip()
-                if candidate:
-                    target = candidate
-                    break
-
-        if not target:
-            return None
-
-        target = re.sub(
-            r"\s*(?:按钮|入口|链接)\s*$",
-            "",
-            target,
-            flags=re.IGNORECASE
-        ).strip()
-
-        if not target or len(target) > 80:
-            return None
-
-        return {
-            "TASK_CONTROL": "CONTINUE_STEP",
-            "ACTION": "CLICK_TEXT_LOCAL",
-            "ARGS": target,
-            "REASON": "明确文字目标，优先本地 OCR bbox 点击",
-            "ACTIONS": [],
-        }
-
-    def deterministic_computer_action(self, question):
-        """V6.28: parse explicit desktop instructions without a Decision LLM.
-
-        Only handles unambiguous commands whose target/arguments are present in
-        the user's text. Unknown GUI intent still falls through to Decision LLM.
-        Multiple explicit commands are returned as one executable queue.
-        """
-        import re
-
-        text = str(question or "").strip()
-        found = []
-
-        click_re = re.compile(
-            r"(?:点击坐标|鼠标点击|单击坐标|click\s*at)\s*[(（]?\s*(\d+)\s*[,，\s]\s*(\d+)\s*[)）]?",
-            re.IGNORECASE,
-        )
-        type_re = re.compile(
-            r"(?:输入|键入|type)\s*[“\"'](.+?)[”\"']",
-            re.IGNORECASE,
-        )
-        key_re = re.compile(
-            r"(?:按\s*|press\s+)"
-            r"(Enter|回车|Tab|Esc|Escape|Space|空格|Backspace|Delete|上|下|左|右|Ctrl\+[A-Za-z]|Alt\+[A-Za-z])"
-            r"\b",
-            re.IGNORECASE,
-        )
-
-        for m in click_re.finditer(text):
-            found.append((m.start(), {
-                "ACTION": "MOUSE_CLICK",
-                "ARGS": f"{m.group(1)},{m.group(2)}",
-                "REASON": "用户明确给出坐标，确定性执行",
-            }))
-        for m in type_re.finditer(text):
-            found.append((m.start(), {
-                "ACTION": "KEYBOARD_TYPE",
-                "ARGS": m.group(1),
-                "REASON": "用户明确给出输入文本，确定性执行",
-            }))
-        for m in key_re.finditer(text):
-            key = m.group(1)
-            key_map = {"回车": "Return", "空格": "space", "Esc": "Escape", "上": "Up", "下": "Down", "左": "Left", "右": "Right"}
-            found.append((m.start(), {
-                "ACTION": "KEYBOARD_PRESS",
-                "ARGS": key_map.get(key, key),
-                "REASON": "用户明确指定按键，确定性执行",
-            }))
-
-        if not found:
-            return None
-
-        found.sort(key=lambda item: item[0])
-        actions = [item[1] for item in found]
-        first = actions[0]
-        return {
-            "TASK_CONTROL": "CONTINUE_STEP",
-            "ACTION": first["ACTION"],
-            "ARGS": first["ARGS"],
-            "REASON": first["REASON"],
-            "NEXT_STEP_REQUIREMENT": "",
-            "ACTIONS": actions,
-        }
 
 
     def ask_decision(
@@ -1309,117 +711,41 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
         ).strip().upper()
 
         phase_next_action = {
-            "SEARCH": "SEARCH、READ 或 COMPUTER ACTION",
-            "READ": "READ、ANALYZE 或 COMPUTER ACTION",
-            "ANALYZE": "VERIFY 或 COMPUTER ACTION",
-            "VERIFY": "MODIFY_PLAN 或 COMPUTER ACTION",
-            "MODIFY_PLAN": "PLAN_VERIFY 或 COMPUTER ACTION",
-            "PLAN_VERIFY": "MODIFY 或 COMPUTER ACTION",
-            "MODIFY": "VERIFY_RESULT 或 COMPUTER ACTION",
-            "VERIFY_RESULT": "DONE、FINISH 或 COMPUTER ACTION",
-            "SUMMARY": "DONE、FINISH 或 COMPUTER ACTION",
+            "SEARCH": "SEARCH 或 READ",
+            "READ": "READ 或 ANALYZE",
+            "ANALYZE": "VERIFY",
+            "VERIFY": "MODIFY_PLAN",
+            "MODIFY_PLAN": "PLAN_VERIFY",
+            "PLAN_VERIFY": "MODIFY",
+            "MODIFY": "VERIFY_RESULT",
+            "VERIFY_RESULT": "DONE 或 FINISH",
+            "SUMMARY": "DONE 或 FINISH",
         }.get(
             phase,
             ""
         )
 
-        if phase == "COMPUTER":
-            decision_prompt = (
-                "你是桌面操作决策器。\\n"
-                "根据任务和最近一次真实工具结果，决定下一步。\\n"
-                "只能输出 JSON，不要解释。\\n"
-                '{"ACTION":"...","ARGS":"...","REASON":"..."}\\n'
-                "允许动作：OBSERVE_WINDOW、WINDOW_LIST、WINDOW_ACTIVATE、"
-                "BROWSER_STATE、BROWSER_TEXT、BROWSER_ELEMENTS、BROWSER_CLICK_TEXT、DONE。\\n"
-                "任务："
-                + str(self.state.get("question", ""))
-                + "\\n最近真实结果："
-                + str(self.state.get("previous_step_result", ""))
-            )
-        else:
-            decision_prompt = (
-                "你是 V6.6 GPT Decision Layer。\\n"
-                "负责决定当前步骤以及整个任务的下一步。\\n"
-                "不要调用工具。\\n"
-                "不要输出代码。\\n"
-                "不要输出解释性正文。\\n"
-                "当前阶段: " + phase + "\\n"
-                "当前阶段允许的下一步 ACTION: "
-                + phase_next_action + "\\n"
-                "开发阶段 ACTION 必须遵守当前阶段流程；"
-                "但 COMPUTER ACTION（MOUSE_MOVE、MOUSE_CLICK、"
-                "KEYBOARD_TYPE、KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE、BROWSER_STATE）"
-                "可在任何阶段按任务需要直接选择。\\n"
-                "严格输出五行：\\n"
-                "TASK_CONTROL: <CONTINUE_STEP|NEXT_STEP|DONE>\\n"
-                "ACTION: <一个允许的 ACTION>\\n"
-                "ARGS: <当前 ACTION 所需参数；无需参数时留空>\\n"
-                "REASON: <简短原因>\\n"
-                "NEXT_STEP_REQUIREMENT: <当 TASK_CONTROL=NEXT_STEP 时必须明确填写下一步骤要求；否则留空>\\n\\n"
-                + str(decision_request)
-            )
-    
-        max_decisions = int(self.state.get("max_llm_decisions", 3))
-        count = int(self.state.get("llm_decision_count", 0))
-        if count >= max_decisions:
-            print(
-                "V6.21 LLM Decision Budget exhausted:",
-                f"{count}/{max_decisions}"
-            )
-            return (
-                '{"TASK_CONTROL":"CONTINUE_STEP",'
-                '"ACTION":"__DECISION_BUDGET_EXHAUSTED__",'
-                '"ARGS":"",'
-                '"REASON":"LLM Decision Budget exhausted; task completion not implied",'
-                '"NEXT_STEP_REQUIREMENT":""}'
-            )
-
-        self.state["llm_decision_count"] = count + 1
-        print(
-            "V6.21 LLM Decision:",
-            self.state["llm_decision_count"],
-            "/",
-            max_decisions
+        decision_prompt = (
+            "你是 V6.6 GPT Decision Layer。\\n"
+            "只负责决定下一步 ACTION。\\n"
+            "不要调用工具。\\n"
+            "不要输出代码。\\n"
+            "不要输出解释性正文。\\n"
+            "当前阶段: " + phase + "\\n"
+            "当前阶段允许的下一步 ACTION: "
+            + phase_next_action + "\\n"
+            "必须从当前阶段允许的 ACTION 中选择，"
+            "禁止选择其他阶段的 ACTION。\\n"
+            "严格输出两行：\\n"
+            "ACTION: <一个允许的 ACTION>\\n"
+            "REASON: <简短原因>\\n\\n"
+            + str(decision_request)
         )
 
-        response = self.ask_llm(
+        return self.ask_llm(
             decision_prompt,
             llm=self.decision_llm
         )
-
-        # V6.22：NEXT_STEP 缺少 NEXT_STEP_REQUIREMENT 时，
-        # 使用已有 REASON 做确定性补全，禁止再次调用 LLM。
-        parsed = self.parse_action(response)
-
-        if (
-            parsed.get("task_control") == "NEXT_STEP"
-            and not str(
-                parsed.get("next_step_requirement", "")
-            ).strip()
-        ):
-            reason = str(
-                parsed.get("reason", "")
-            ).strip()
-
-            if reason:
-                parsed["next_step_requirement"] = reason
-                response = __import__("json").dumps(
-                    {
-                        "TASK_CONTROL": "NEXT_STEP",
-                        "ACTION": parsed.get("action", ""),
-                        "ARGS": parsed.get("args", ""),
-                        "REASON": reason,
-                        "NEXT_STEP_REQUIREMENT": reason
-                    },
-                    ensure_ascii=False
-                )
-
-        print(
-            "V6.10 RAW DECISION RESPONSE:",
-            repr(response)
-        )
-
-        return response
 
     def decision_step(
         self,
@@ -1443,43 +769,14 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             action_data
         )
 
-        # NEXT_STEP 必须明确携带下一步骤要求。
-        # 防止 GPT 只说“继续下一步”而没有可执行要求。
-        if (
-            action_data.get("task_control") == "NEXT_STEP"
-            and not str(
-                action_data.get("next_step_requirement", "")
-            ).strip()
-        ):
-            validation["allowed"] = False
-            validation["reason"] = (
-                "NEXT_STEP_REQUIREMENT 为空，禁止推进下一步骤"
-            )
-
         result = {
-            "task_control": action_data.get(
-                "task_control",
-                "CONTINUE_STEP"
-            ),
             "action": action_data.get(
                 "action",
-                ""
-            ),
-            "args": action_data.get(
-                "args",
                 ""
             ),
             "reason": action_data.get(
                 "reason",
                 ""
-            ),
-            "next_step_requirement": action_data.get(
-                "next_step_requirement",
-                ""
-            ),
-            "actions": action_data.get(
-                "actions",
-                []
             ),
             "allowed": validation.get(
                 "allowed",
@@ -1570,18 +867,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             "TEST",
             "BUILD",
             "VERIFY_RESULT",
-            "MOUSE_MOVE",
-            "MOUSE_CLICK",
-            "KEYBOARD_TYPE",
-            "KEYBOARD_PRESS",
-        "WINDOW_ACTIVATE",
-            "WINDOW_LIST",
-            "WINDOW_ACTIVATE",
-        "OBSERVE_WINDOW",
-            "BROWSER_STATE",
-            "BROWSER_TEXT",
-            "BROWSER_ELEMENTS",
-            "BROWSER_CLICK_TEXT",
             "DONE",
             "FINISH"
         }
@@ -1597,43 +882,8 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             self.state.get("phase", "")
         ).strip().upper()
 
-        # V6.20: 原始任务明确禁止点击、输入或修改时，
-        # Python 安全层直接拒绝对应动作，不依赖 LLM 自律。
-        original_task = str(
-            self.state.get("question", "")
-        )
-        forbidden_action_words = (
-            "禁止点击" in original_task
-            or "禁止输入" in original_task
-            or "禁止修改" in original_task
-        )
-        if forbidden_action_words and action in {
-            "MOUSE_CLICK",
-            "KEYBOARD_TYPE",
-            "KEYBOARD_PRESS",
-        "WINDOW_ACTIVATE",
-            "MODIFY",
-        }:
-            return {
-                "allowed": False,
-                "action": action,
-                "reason": "原始任务明确禁止点击、输入或修改，Python 安全层拒绝该动作"
-            }
-
-        # V6.11: GPT 已明确确认整个原始任务完成时，
-        # DONE 属于全局终态，不受当前 phase ACTION 白名单限制。
-        if (
-            str(action_data.get("task_control", "")).strip().upper() == "DONE"
-            and action == "DONE"
-        ):
-            return {
-                "allowed": True,
-                "action": "DONE",
-                "reason": "GPT 已确认原始任务完成"
-            }
-
         phase_actions = {
-            "SEARCH": {"SEARCH", "READ", "VERIFY_RESULT"},
+            "SEARCH": {"SEARCH", "READ"},
             "READ": {"READ", "ANALYZE"},
             "ANALYZE": {"VERIFY"},
             "VERIFY": {"MODIFY_PLAN"},
@@ -1641,17 +891,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             "PLAN_VERIFY": {"MODIFY"},
             "MODIFY": {"VERIFY_RESULT"},
             "VERIFY_RESULT": {"DONE", "FINISH"},
-            "COMPUTER": {
-                "MOUSE_MOVE",
-                "MOUSE_CLICK",
-                "KEYBOARD_TYPE",
-                "KEYBOARD_PRESS",
-        "WINDOW_ACTIVATE",
-                "WINDOW_LIST",
-                "WINDOW_ACTIVATE",
-        "OBSERVE_WINDOW",
-                "BROWSER_STATE",
-            },
             "SUMMARY": {"DONE", "FINISH"},
         }
 
@@ -1660,22 +899,7 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             set()
         )
 
-        computer_actions = {
-            "MOUSE_MOVE",
-            "MOUSE_CLICK",
-            "KEYBOARD_TYPE",
-            "BROWSER_STATE",
-            "KEYBOARD_PRESS",
-        "WINDOW_ACTIVATE",
-            "WINDOW_LIST",
-            "WINDOW_ACTIVATE",
-        "OBSERVE_WINDOW",
-        }
-
-        if (
-            action not in allowed_for_phase
-            and action not in computer_actions
-        ):
+        if action not in allowed_for_phase:
             return {
                 "allowed": False,
                 "action": action,
@@ -2323,21 +1547,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
                 "write_file"
             ],
 
-            "COMPUTER": [
-                "mouse_move",
-                "mouse_click",
-                "keyboard_type",
-                "keyboard_press",
-                "window_list",
-                "window_activate",
-                "observe_window_tool",
-                "browser_state",
-                "browser_text_tool",
-                "browser_elements_tool",
-                "browser_click_text_tool",
-                "click_text_local"
-            ],
-
             "SUMMARY": []
 
         }
@@ -2346,26 +1555,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             phase,
             []
         )
-
-    def build_computer_prompt(
-        self,
-        question,
-        observation
-    ):
-        """V6.12 COMPUTER 专用轻量 Decision Prompt。"""
-        return (
-            "你是浏览器操作决策器。\\n"
-            "根据用户任务和最近一次真实浏览器结果，决定下一步动作。\\n"
-            "只能输出 JSON，不要解释。\\n"
-            '{"ACTION":"...","ARGS":"...","REASON":"..."}\\n'
-            "允许动作：MOUSE_MOVE、MOUSE_CLICK、KEYBOARD_TYPE、"
-            "KEYBOARD_PRESS、WINDOW_LIST、WINDOW_ACTIVATE、BROWSER_STATE、DONE。\\n"
-            "用户任务："
-            + str(question)
-            + "\\n最近真实结果："
-            + str(observation)
-        )
-
 
     def build_prompt(
         self,
@@ -2585,10 +1774,6 @@ SUMMARY
         resume=False
     ):
 
-        # V6.24: run() 后续兼容分支会局部 import json；
-        # 在函数入口显式导入，保证前置确定性路由可安全使用。
-        import json
-
         # V6.1.7:
         # 新任务从干净状态开始。
         # Codex 恢复模式保留现有 state。
@@ -2623,62 +1808,14 @@ SUMMARY
             "调整",
         ]
 
-        browser_keywords = [
-            "浏览器",
-            "Chromium",
-            "Chrome",
-            "网页",
-            "页面",
-            "URL",
-            "网址",
-        ]
-
-        browser_task = any(
-            keyword in question
-            for keyword in browser_keywords
-        )
-
-        computer_keywords = [
-            "钉钉",
-            "微信",
-            "桌面",
-            "窗口",
-            "应用",
-            "点击",
-            "激活",
-            "打开",
-            "按键",
-            "观察",
-        ]
-
-        computer_task = any(
-            keyword in question
-            for keyword in computer_keywords
-        )
-
-        change_task = any(
-            keyword in question
-            for keyword in change_keywords
-        ) and not any(
-            phrase in question
-            for phrase in [
-                "不要修改",
-                "无需修改",
-                "不修改",
-                "禁止修改",
-                "不要改",
-            ]
-        )
-
         self.state["task_mode"] = (
             "CHANGE"
-            if change_task
+            if any(
+                keyword in question
+                for keyword in change_keywords
+            )
             else "REVIEW"
         )
-
-        if computer_task:
-            self.state["task_mode"] = "REVIEW"
-            self.state["phase"] = "COMPUTER"
 
         print(
             "V6.1 task mode:",
@@ -2693,202 +1830,6 @@ SUMMARY
 
         observation = ""
 
-        # V6.12: 浏览器纯状态读取快速通道。
-        # 标题/URL 这类确定性读取无需调用 LLM。
-        browser_read_only = (
-            browser_task
-            and any(
-                keyword in str(question)
-                for keyword in [
-                    "读取当前 Chromium 浏览器的真实状态",
-                    "读取当前浏览器的真实状态",
-                    "当前页面标题和 URL",
-                    "当前页面标题和URL",
-                ]
-            )
-            and not any(
-                keyword in str(question)
-                for keyword in [
-                    "点击",
-                    "输入",
-                    "打开",
-                    "访问",
-                    "导航",
-                    "搜索",
-                ]
-            )
-        )
-
-        if browser_read_only:
-            try:
-                from tools.browser_tools import browser_state
-                browser_result = browser_state.invoke({})
-
-                import json as _json
-                browser_data = _json.loads(
-                    str(browser_result)
-                )
-                title = str(
-                    browser_data.get("title", "")
-                ).strip()
-                url = str(
-                    browser_data.get("url", "")
-                ).strip()
-
-                final_result = (
-                    "标题：" + title + "\n"
-                    "URL：" + url
-                )
-
-                print("V6.12 BROWSER FAST PATH:")
-                print(final_result)
-
-                self.state["previous_step_result"] = final_result
-                self.state["verify_result_done"] = True
-                self.state["verify_result_passed"] = True
-                self.state["phase"] = "DONE"
-
-                return browser_result
-
-            except Exception as e:
-                print(
-                    "V6.12 BROWSER FAST PATH ERROR:",
-                    str(e)
-                )
-
-        # V6.17.1: 通用桌面应用观察快速通道
-        target_app = extract_target_app(question)
-        simple_gui_observe = (
-            computer_task
-            and target_app
-            and ("观察" in str(question) or "第一步必须" in str(question))
-            and any(
-                phrase in str(question)
-                for phrase in ["不要点击", "不点击", "无需点击", "不要输入", "不要修改", "不修改"]
-            )
-        )
-        if simple_gui_observe:
-            try:
-                from tools.gui_observer import observe_window
-                observed = observe_window(target_app)
-                if observed:
-                    from tools.computer_tools import window_activate
-                    window_activate(observed["window_id"])
-                    observed = observe_window(target_app)
-
-                # V6.17.2：目标应用不存在时自动启动，再重新观察。
-                if not observed:
-                    print("V6.17.2 GUI: 未找到", target_app, "，尝试自动启动")
-                    observed = launch_target_app(target_app)
-                    if observed:
-                        print("V6.18 GUI: 已启动并找到窗口")
-
-                if observed:
-                    final_result = (
-                        "已观察到" + target_app + "窗口："
-                        + observed["title"]
-                        + " "
-                        + str(observed["width"])
-                        + "x"
-                        + str(observed["height"])
-                    )
-                    print("V6.17.2 GUI FAST PATH:", final_result)
-                    self.state["previous_step_result"] = final_result
-                    self.state["verify_result_done"] = True
-                    self.state["verify_result_passed"] = True
-                    self.state["phase"] = "DONE"
-                    print("V6.17.2 GUI FAST PATH: DONE")
-                    return final_result
-            except Exception as e:
-                print("V6.17.2 GUI FAST PATH ERROR:", str(e))
-
-        # V6.25：浏览器确定性搜索快速通道。
-        # 用户明确要求“搜索/搜一下/查询”时，直接导航搜索引擎，
-        # 不调用 Decision LLM；搜索结果再由真实浏览器状态验证。
-        explicit_search = re.search(
-            r"(?:搜索|搜一下|搜\s*|查询|search\s+)(?:一下|一下子)?[：: ]*[“\"']?(.+?)[“\"']?(?:$|。|，|\n)",
-            str(question),
-            re.IGNORECASE,
-        )
-        search_only_task = not any(
-            word in str(question) for word in [
-                "点击", "单击", "click", "输入", "填写", "然后", "再",
-                "打开", "访问", "导航", "比较", "分析", "总结", "查找并"
-            ]
-        )
-        if browser_task and explicit_search and search_only_task and not any(
-            word in str(question) for word in ["代码搜索", "搜索源码", "search_code_index"]
-        ):
-            query = explicit_search.group(1).strip().strip('“”\"\' ')
-            if query:
-                try:
-                    from tools.browser_observer import browser_search, browser_text
-                    if browser_search(query):
-                        time.sleep(0.4)
-                        current_text = browser_text()
-                        final_result = "已搜索：" + query + "\n" + str(current_text)[:12000]
-                        print("V6.25 BROWSER SEARCH FAST PATH:", query)
-                        self.state["previous_step_result"] = final_result
-                        self.state["verify_result_done"] = True
-                        self.state["verify_result_passed"] = True
-                        self.state["phase"] = "DONE"
-                        return final_result
-                except Exception as e:
-                    print("V6.25 BROWSER SEARCH FAST PATH ERROR:", str(e))
-
-        # V6.14：简单浏览器动作快速通道
-        # 明确给出“点击某文字”时，先读取 DOM 元素并直接点击，
-        # 不需要 GPT 决定点击哪个元素。
-        explicit_click = re.search(
-            r"(?:点击|单击|click)\s*[“\"']([^“”\"']+)[“\"']",
-            str(question),
-            re.IGNORECASE,
-        )
-        if browser_task and explicit_click and not explicit_search:
-            target = explicit_click.group(1).strip()
-            try:
-                from tools.browser_observer import browser_elements, browser_click_text, browser_text
-                elements = browser_elements()
-                found = any(
-                    str(e.get("text", "")).strip() == target
-                    or str(e.get("aria", "")).strip() == target
-                    for e in elements
-                )
-                if found and browser_click_text(target):
-                    time.sleep(0.2)
-                    current_text = browser_text()
-                    final_result = "已点击：" + target + "\n" + str(current_text)[:12000]
-                    print("V6.25 BROWSER CLICK FAST PATH:", target)
-                    self.state["previous_step_result"] = final_result
-                    self.state["verify_result_done"] = True
-                    self.state["verify_result_passed"] = True
-                    self.state["phase"] = "DONE"
-                    return final_result
-            except Exception as e:
-                print("V6.25 BROWSER CLICK FAST PATH ERROR:", str(e))
-
-        # V6.14: 简单浏览器动作快速通道
-        simple_browser_click = re.search(r'(?:如果|若).*?(?:页面|网页).*?(?:看到|出现)[“"”]([^“"”]+)[“"”].*?(?:点击|单击)[“"”]([^“"”]+)[“"”]', str(question))
-        if browser_task and simple_browser_click:
-            target = simple_browser_click.group(2).strip()
-            try:
-                from tools.browser_observer import browser_elements, browser_click_text, browser_text
-                elements = browser_elements()
-                found = any(str(e.get("text", "")).strip() == target or str(e.get("aria", "")).strip() == target for e in elements)
-                if found:
-                    print("V6.14 BROWSER FAST PATH: CLICK", target)
-                    clicked = browser_click_text(target)
-                    if clicked:
-                        observation = browser_text()
-                        self.state["previous_step_result"] = observation
-                        self.state["verify_result_done"] = True
-                        self.state["verify_result_passed"] = True
-                        self.state["phase"] = "DONE"
-                        print("V6.14 BROWSER FAST PATH: DONE")
-                        return observation
-            except Exception as e:
-                print("V6.14 BROWSER FAST PATH ERROR:", str(e))
-
         for step in range(
             1,
             self.max_steps + 1
@@ -2901,44 +1842,21 @@ SUMMARY
                 "=========="
             )
 
-            # V6.12: COMPUTER 首次进入时必须先建立 Decision Request。
-            if (
-                self.state.get("phase") == "COMPUTER"
-                and not self.state.get("decision_request", "").strip()
-            ):
-                self.state["decision_request"] = self.build_decision_request(
-                    observation="当前已进入 COMPUTER 阶段。请根据真实浏览器任务决定下一步 ACTION。"
-                )
 
             if (
                 self.state.get("phase") == "SEARCH"
                 and self.state.get("task_mode") == "CHANGE"
             ):
                 path_match = re.search(
-                    r"(/[^\s]+\.(?:py|cpp|cc|c|h|hpp))|"
-                    r"(?<![\w/.-])([\w.-]+\.(?:py|cpp|cc|c|h|hpp))",
+                    r"(/[^\s]+\.(?:py|cpp|cc|c|h|hpp))",
                     question
                 )
 
-                candidate = None
-                if path_match:
-                    absolute_candidate = path_match.group(1)
-                    relative_candidate = path_match.group(2)
-
-                    if (
-                        absolute_candidate
-                        and os.path.isfile(absolute_candidate)
-                    ):
-                        candidate = absolute_candidate
-                    elif relative_candidate:
-                        project_candidate = os.path.join(
-                            self.project,
-                            relative_candidate
-                        )
-                        if os.path.isfile(project_candidate):
-                            candidate = project_candidate
-
-                if candidate:
+                if (
+                    path_match
+                    and os.path.isfile(path_match.group(1))
+                ):
+                    candidate = path_match.group(1)
 
                     self.state["target_files"] = [candidate]
                     self.state["target_file"] = candidate
@@ -2954,42 +1872,10 @@ SUMMARY
 
                     continue
 
-            # V6.24: SEARCH 是确定性工具路由，不再先调用 LLM 再强制 SEARCH。
-            # search_code_index 本身只需要关键词/任务文本，不需要模型决定“是否搜索”。
-            # 这样普通代码任务的第一轮至少节省 1 次 LLM。
-            deterministic_search = (
-                self.state.get("phase") == "SEARCH"
-                and self.state.get("task_mode") in {"REVIEW", "CHANGE"}
+            prompt = self.build_prompt(
+                question,
+                observation
             )
-
-            if deterministic_search:
-                response = json.dumps({
-                    "TASK_CONTROL": "CONTINUE_STEP",
-                    "ACTION": "SEARCH",
-                    "ARGS": "",
-                    "REASON": "SEARCH 阶段由 Python 状态机确定性执行",
-                    "NEXT_STEP_REQUIREMENT": ""
-                }, ensure_ascii=False)
-                prompt = ""
-                print("V6.24 DETERMINISTIC SEARCH → skip LLM")
-            elif self.state.get("phase") == "COMPUTER":
-                prompt = self.build_computer_prompt(
-                    question,
-                    self.state.get("previous_step_result", observation)
-                )
-            else:
-                prompt = self.build_prompt(
-                    question,
-                    observation
-                )
-
-            # V6.23：ANALYZE 完成后由 Python 状态机确定性进入 VERIFY。
-            # ANALYZE 不再经过 Decision Layer，避免 3B 模型输出无效 ACTION
-            # 导致 ANALYZE -> ANALYZE 死循环。
-            if self.state.get("phase") == "ANALYZE" and self.state.get("analyze_done"):
-                self.state["phase"] = "VERIFY"
-                print("V6.23 ANALYZE -> VERIFY deterministic")
-                continue
 
             # V6.6:
             # 将标准 Decision Request 注入当前 LLM 请求。
@@ -2999,7 +1885,7 @@ SUMMARY
                 ""
             )
 
-            if decision_request and self.state.get("phase") != "COMPUTER":
+            if decision_request:
                 prompt += (
                     "\n\n========== V6.6 GPT DECISION REQUEST ==========\n"
                     + decision_request
@@ -3483,29 +2369,7 @@ SUMMARY
                     "REVIEW"
                 )
                 if task_mode == "CHANGE":
-                    # V6.10：识别用户明确要求“必须实际 MODIFY”的步骤约束。
-                    step_requirement = str(
-                        self.state.get("current_step_requirement", "")
-                    )
-                    original_task = str(
-                        self.state.get("original_task", "")
-                    )
-                    force_modify_text = (
-                        step_requirement + "\n" + original_task
-                    )
-                    force_modify_markers = (
-                        "必须实际修改",
-                        "必须实际 MODIFY",
-                        "必须 MODIFY",
-                        "不得跳过",
-                        "不能跳过",
-                    )
-                    self.state["modify_required"] = any(
-                        marker in force_modify_text
-                        for marker in force_modify_markers
-                    )
-
-                    # V6.3: 通用 CHANGE 需求缺失判断.
+                    # V6.3: 通用 CHANGE 需求缺失判断。
                     # 只根据 ANALYZE 的“问题”段判断，
                     # 不绑定具体业务关键词，也不依赖“结论”字段。
                     problem_match = re.search(
@@ -3645,38 +2509,17 @@ SUMMARY
                         # 不能继续落入旧的 SUMMARY 控制流。
                         continue
 
-                    # V6.10：当前步骤明确要求实际 MODIFY 时，
-                    # 即使需求已经满足，也必须进入真实修改链路。
-                    if (
-                        self.state.get("modify_required", False)
-                        and not self.state.get("modify_executed", False)
-                    ):
-                        print(
-                            "V6.10 CHANGE FORCE MODIFY: "
-                            "当前步骤要求实际 MODIFY → 禁止跳过修改"
-                        )
-
-                        self.state["problem_confirmed"] = True
-                        self.state["can_modify"] = True
-                        self.state["summary_done"] = False
-                        self.state["phase"] = "MODIFY_PLAN"
-
-                        continue
-
                     # V6.9：只有任务级功能检查通过后，
                     # GPT 才能决定当前是否无需修改。
                     if not change_not_satisfied:
                         print(
-                            "V6.9 CHANGE: 需求已满足 → 必须先执行真实验证"
+                            "V6.9 CHANGE: 需求已满足 → 直接 SUMMARY"
                         )
 
                         self.state["problem_confirmed"] = False
                         self.state["can_modify"] = False
-                        self.state["summary_done"] = False
-                        self.state["verify_result_done"] = False
-                        self.state["verify_result_passed"] = False
-                        self.state["modified_file"] = self.state.get("target_file")
-                        self.state["phase"] = "VERIFY_RESULT"
+                        self.state["summary_done"] = True
+                        self.state["phase"] = "SUMMARY"
 
                         continue
 
@@ -4475,10 +3318,6 @@ path
                     result
                 )
 
-                # V6.10：已经实际执行 write_file，记录当前步骤已执行 MODIFY。
-                # 内容是否正确仍必须由后续 VERIFY_RESULT 真实验证。
-                self.state["modify_executed"] = True
-
                 # V5.17:
                 # MODIFY 成功后必须进入 VERIFY_RESULT，
                 # 不能直接进入 SUMMARY。
@@ -4498,26 +3337,15 @@ path
             # V5.17:
             # MODIFY 后进入 VERIFY_RESULT。
             # 读取实际修改后的文件，验证修改是否真实落地。
-            if self.state["phase"] == "VERIFY_RESULT":
+            if (
+                self.state["phase"] == "VERIFY_RESULT"
+                and self.state["modified_file"]
+            ):
 
                 print()
                 print("========== VERIFY RESULT ==========")
 
-                modified_file = (
-                    self.state.get("modified_file")
-                    or self.state.get("target_file")
-                )
-
-                if not modified_file:
-                    self.state["verify_result_done"] = True
-                    self.state["verify_result_passed"] = False
-                    self.state["verify_result"] = (
-                        "VERIFY_RESULT:\n"
-                        "FAIL\n\n理由:\n"
-                        "没有可验证的目标文件"
-                    )
-                    self.state["phase"] = "SUMMARY"
-                    continue
+                modified_file = self.state["modified_file"]
 
                 verify_result = self.controller.call(
                     "read_file_chunk",
@@ -4686,33 +3514,13 @@ path
                     passed
                 )
 
-                # V6.24：只有本轮真实验证通过，才需要让 GPT 判断“整个任务”
-                # 是否完成以及下一步是什么。验证失败时无需再做一次完成判断，
-                # 直接进入下一轮修复闭环即可，避免无意义的额外 LLM 调用。
-                if self.state.get("verify_result_passed", False):
-                    completion = self.check_task_completion()
-                else:
-                    completion = {
-                        "complete": False,
-                        "progress": "本轮修改已执行，但最终验证未通过",
-                        "remaining": "修复本轮修改并重新验证",
-                        "next_step_requirement": "修复本轮修改失败的问题并重新验证",
-                        "raw": ""
-                    }
+                # V6.10：VERIFY_RESULT 只验证“本轮修改”。
+                # 这里进一步判断“整个用户任务”是否已经完成。
+                completion = self.check_task_completion()
 
                 self.state["task_complete"] = completion["complete"]
                 self.state["task_progress"] = completion["progress"]
                 self.state["remaining_requirements"] = completion["remaining"]
-                self.state["next_step_requirement"] = completion.get("next_step_requirement", "").strip()
-
-                # GPT 若未给出专门的下一步字段，使用 REMAINING 作为确定性兜底。
-                if (
-                    not self.state["task_complete"]
-                    and not self.state["next_step_requirement"]
-                    and self.state["remaining_requirements"]
-                    and self.state["remaining_requirements"].upper() != "NONE"
-                ):
-                    self.state["next_step_requirement"] = self.state["remaining_requirements"]
 
                 print(
                     "V6.10 TASK_COMPLETION:",
@@ -4729,12 +3537,12 @@ path
                 )
 
                 if completion["complete"]:
-                    self.state["task_control"] = "DONE"
-                    self.state["summary_done"] = True
                     self.state["phase"] = "SUMMARY"
-                    print("V6.15 TASK_COMPLETE → 直接进入 SUMMARY")
-
+                    print(
+                        "V6.10 TASK_COMPLETE → SUMMARY"
+                    )
                     continue
+
                 # V6.10：任务级完成判断与 CHANGE 分析证据必须隔离。
                 # check_task_completion() 的 GPT 输出只负责判断：
                 # “整个用户任务是否完成”。
@@ -4749,54 +3557,6 @@ path
                 self.state["codex_modified_source"] = ""
                 self.state["expected_result"] = ""
                 self.state["analysis_evidence_invalid"] = False
-
-                # V6.24：VERIFY_RESULT 后不再再调用一次本地 Decision LLM。
-                # check_task_completion() 已经由 GPT 普通聊天完成：
-                #   1. 整体任务是否完成
-                #   2. 未完成时下一轮最小步骤要求
-                # 因此这里直接使用同一次 GPT 结果推进状态机。
-                if self.state.get("verify_result_passed", False):
-                    next_requirement = str(
-                        self.state.get("next_step_requirement", "")
-                    ).strip()
-
-                    if next_requirement:
-                        current_step = str(
-                            self.state.get("current_step_id", "STEP-001")
-                        )
-                        try:
-                            step_number = int(current_step.rsplit("-", 1)[1])
-                        except Exception:
-                            step_number = 1
-                        next_step = "STEP-" + str(step_number + 1).zfill(3)
-
-                        self.state["task_control"] = "NEXT_STEP"
-                        self.state["previous_step_result"] = str(self.state.get("verify_result", ""))
-                        self.state["current_step_id"] = next_step
-                        self.state["current_step_requirement"] = next_requirement
-
-                        print("V6.24 STEP ADVANCE (single GPT completion call):", current_step, "->", next_step)
-
-                        self.state["read_index"] = 0
-                        self.state["analysis_context"] = []
-                        self.state["read_done"] = False
-                        self.state["analyze_done"] = False
-                        self.state["analysis_result"] = ""
-                        self.state["problem_confirmed"] = False
-                        self.state["modify_required"] = False
-                        self.state["modify_executed"] = False
-                        self.state["modify_plan_done"] = False
-                        self.state["modify_plan"] = ""
-                        self.state["plan_verify_done"] = False
-                        self.state["plan_verify_passed"] = False
-                        self.state["verify_done"] = False
-                        self.state["verify_result_done"] = False
-                        self.state["verify_result_passed"] = False
-                        self.state["verify_result"] = ""
-                        self.state["next_step_requirement"] = ""
-                        self.state["phase"] = "READ"
-                        continue
-
 
                 # 任务尚未完成：
                 # 开始下一轮真实 GPT↔V6 协作。
@@ -4829,6 +3589,8 @@ path
 
                 self.state["problem_confirmed"] = False
                 self.state["can_modify"] = False
+
+                # target_file 保留，SEARCH 会复用可靠目标文件。
                 self.state["phase"] = "READ"
 
                 continue
@@ -4898,8 +3660,7 @@ path
                 and self.state.get("task_mode") == "CHANGE"
                 and not self.state.get("problem_confirmed", False)
                 and self.state.get("summary_done", False)
-                and self.state.get("verify_result_done", False)
-                and self.state.get("verify_result_passed", False)
+                and not self.state.get("verify_result_done", False)
             ):
                 response = (
                     "### 最终报告\\n\\n"
@@ -4983,162 +3744,13 @@ path
                 break
 
 
-            # V6.20：确定性 GUI 观察先于 LLM。
-            queued_action = None
-            if (
-                self.state.get("phase") == "COMPUTER"
-                and not self.state.get("computer_observe_done")
-                and target_app
-                and "第一步必须" in str(question)
-            ):
-                response = __import__("json").dumps({
-                    "TASK_CONTROL": "NEXT_STEP",
-                    "ACTION": "OBSERVE_WINDOW",
-                    "ARGS": {"query": target_app},
-                    "REASON": "确定性执行任务要求的第一步桌面观察，不调用 LLM",
-                    "NEXT_STEP_REQUIREMENT": "根据真实观察结果决定下一步"
-                }, ensure_ascii=False)
-                self.state["computer_observe_done"] = True
-                queued_action = response
-                print("V6.20 DETERMINISTIC OBSERVE →", target_app)
-
-            # V6.12：COMPUTER 动作队列非空时，跳过 LLM，直接执行下一动作。
-            #
-            # V6.28.4：
-            # Queue 中的动作已经在上一轮确定性解析完成。
-            # 当前动作直接进入 computer_tools dispatch，
-            # 不允许再次进入 Decision Layer。
-            if queued_action is None and self.state.get("computer_action_queue"):
-                queued_action = self.state["computer_action_queue"].pop(0)
-                response = __import__("json").dumps(
-                    queued_action,
-                    ensure_ascii=False
-                )
-                prompt = ""
-
-                self.state["computer_queue_direct_dispatch"] = True
-
-                print(
-                    "V6.28.5 COMPUTER Queue DIRECT →",
-                    queued_action.get(
-                        "ACTION",
-                        queued_action.get("action", "")
-                    ),
-                    "ARGS=",
-                    queued_action.get(
-                        "ARGS",
-                        queued_action.get("args", "")
-                    )
-                )
-
-            # V6.29-R3.3-C：
-            # 明确“找到文字目标并点击”时，优先本地 OCR bbox。
-            deterministic_local_click = None
-
-            if (
-                queued_action is None
-                and self.state.get("phase") == "COMPUTER"
-                and not self.state.get(
-                    "deterministic_computer_consumed",
-                    False
-                )
-            ):
-                deterministic_local_click = (
-                    self.local_text_click_action(question)
-                )
-
-                if deterministic_local_click:
-                    self.state["deterministic_local_click"] = True
-                    self.state["deterministic_local_click_failed"] = False
-                    self.state["deterministic_computer_consumed"] = True
-
-                    response = json.dumps(
-                        deterministic_local_click,
-                        ensure_ascii=False
-                    )
-                    prompt = ""
-
-                    print(
-                        "V6.29-R3.3-C LOCAL TEXT CLICK →",
-                        deterministic_local_click.get(
-                            "ARGS",
-                            ""
-                        )
-                    )
-
-            # V6.28：显式桌面命令直接执行，禁止进入 Decision LLM。
-            deterministic_computer = None
-            if (
-                queued_action is None
-                and self.state.get("phase") == "COMPUTER"
-                and not self.state.get("deterministic_computer_consumed", False)
-            ):
-                deterministic_computer = self.deterministic_computer_action(question)
-
-                # V6.28.2：本轮 question 的确定性桌面命令只解析一次。
-                self.state["deterministic_computer_consumed"] = True
-                if deterministic_computer:
-                    response = json.dumps(deterministic_computer, ensure_ascii=False)
-                    prompt = ""
-                    print(
-                        "V6.28 DETERMINISTIC COMPUTER →",
-                        deterministic_computer.get("ACTION"),
-                        deterministic_computer.get("ARGS", "")
-                    )
-
             print(
                 "V6 DEBUG BEFORE LLM:",
                 "phase =", self.state.get("phase"),
                 "prompt_chars =", len(str(prompt))
             )
 
-            # V6.27：开发状态机阶段动作本身已经由状态机唯一确定。
-            # READ / VERIFY / MODIFY_PLAN / PLAN_VERIFY / MODIFY / VERIFY_RESULT
-            # 不再先调用一次 Decision LLM 再被后面的状态机强制覆盖。
-            # MODIFY 阶段仍会在真正需要生成完整源码时调用一次执行 LLM；
-            # 这里跳过的是“多余的下一步决策”调用。
-            deterministic_phase_action = None
-            if queued_action is None and not deterministic_search:
-                phase_actions = {
-                    "READ": "READ",
-                    "VERIFY": "VERIFY",
-                    "MODIFY_PLAN": "MODIFY_PLAN",
-                    "PLAN_VERIFY": "PLAN_VERIFY",
-                    "MODIFY": "MODIFY",
-                    "VERIFY_RESULT": "VERIFY_RESULT",
-                }
-                phase_action = phase_actions.get(
-                    str(self.state.get("phase", "")).upper()
-                )
-                if phase_action:
-                    deterministic_phase_action = phase_action
-                    response = json.dumps({
-                        "TASK_CONTROL": "CONTINUE_STEP",
-                        "ACTION": phase_action,
-                        "ARGS": "",
-                        "REASON": "当前状态机阶段已经唯一确定下一动作，跳过 Decision LLM",
-                        "NEXT_STEP_REQUIREMENT": "",
-                    }, ensure_ascii=False)
-                    prompt = ""
-                    print("V6.27 DETERMINISTIC PHASE →", phase_action, "skip decision LLM")
-
-            if queued_action is not None:
-                # 确定性动作已经生成，禁止再次调用 LLM。
-                pass
-            elif deterministic_local_click:
-                # V6.29-R3.3-C：本地 OCR 点击已经确定。
-                pass
-            elif deterministic_computer:
-                # V6.28：显式桌面命令已确定，禁止再次调用 Decision LLM。
-                pass
-            elif deterministic_search:
-                # SEARCH 的 ACTION 由 Python 已确定，不经过 Decision Layer。
-                print("V6.24 SEARCH: deterministic action, skip decision LLM")
-            elif deterministic_phase_action:
-                # V6.27：阶段动作已由状态机唯一确定，保持上面生成的响应，
-                # 绝不落入 Decision LLM。
-                print("V6.27 deterministic phase action: skip decision LLM")
-            elif self.state.get("phase") == "ANALYZE":
+            if self.state.get("phase") == "ANALYZE":
                 response = (
                     "<analyze_code>\n"
                     + str(
@@ -5154,7 +3766,9 @@ path
                     "V6.9 ANALYZE: direct analyze_code, skip LLM"
                 )
             else:
-                response = self.ask_llm(prompt)
+                response = self.ask_llm(
+                    prompt
+                )
 
             print(response)
 
@@ -5162,296 +3776,19 @@ path
             # GPT Decision Protocol。
             # 如果外部提供 GPT ACTION，则先经过 V6 安全验证。
             # 当前不改变既有状态机执行逻辑。
-            if deterministic_local_click:
-                decision = {
-                    "allowed": True,
-                    "action": "CLICK_TEXT_LOCAL",
-                    "args": str(
-                        deterministic_local_click.get(
-                            "ARGS",
-                            ""
-                        )
-                    ).strip(),
-                    "task_control": "CONTINUE_STEP",
-                    "reason": str(
-                        deterministic_local_click.get(
-                            "REASON",
-                            ""
-                        )
-                    ),
-                    "actions": [],
-                }
-
-                print(
-                    "V6.29-R3.3-C LOCAL CLICK decision DIRECT →",
-                    decision["args"],
-                    "skip Decision LLM"
-                )
-
-            elif deterministic_computer:
-                # V6.28.3：
-                # 当前任务由用户的显式 COMPUTER 指令完全确定。
-                # 例如：点击坐标 -> 输入文本 -> 按回车。
-                # 这类任务完成动作队列后直接结束，不再进入
-                # ANALYZE / VERIFY / Decision LLM。
-                self.state["deterministic_computer_task"] = True
-                self.state["deterministic_computer_failed"] = False
-
-                decision = {
-                    "allowed": True,
-                    "action": deterministic_computer.get("ACTION", ""),
-                    "args": deterministic_computer.get("ARGS", ""),
-                    "task_control": deterministic_computer.get("TASK_CONTROL", "CONTINUE_STEP"),
-                    "actions": deterministic_computer.get("ACTIONS", [])
-                }
-
-            # V6.28.4：
-            # Queue 后续动作已经确定，直接构造 decision。
-            # 这里是 Queue 与统一 computer_tools dispatch 的桥接点。
-            # 绝不能落入 decision_step()。
-            elif queued_action is not None:
-                decision = {
-                    "allowed": True,
-                    "action": str(
-                        queued_action.get(
-                            "ACTION",
-                            queued_action.get("action", "")
-                        )
-                    ).strip().upper(),
-                    "args": str(
-                        queued_action.get(
-                            "ARGS",
-                            queued_action.get("args", "")
-                        )
-                    ).strip(),
-                    "task_control": str(
-                        queued_action.get(
-                            "TASK_CONTROL",
-                            queued_action.get(
-                                "task_control",
-                                "CONTINUE_STEP"
-                            )
-                        )
-                    ).strip().upper(),
-                    "reason": str(
-                        queued_action.get(
-                            "REASON",
-                            queued_action.get("reason", "")
-                        )
-                    ),
-                    "actions": [
-                        {
-                            "ACTION": str(
-                                queued_action.get(
-                                    "ACTION",
-                                    queued_action.get("action", "")
-                                )
-                            ).strip().upper(),
-                            "ARGS": str(
-                                queued_action.get(
-                                    "ARGS",
-                                    queued_action.get("args", "")
-                                )
-                            ).strip(),
-                            "REASON": str(
-                                queued_action.get(
-                                    "REASON",
-                                    queued_action.get("reason", "")
-                                )
-                            )
-                        }
-                    ]
-                }
-
-                print(
-                    "V6.28.5 COMPUTER Queue decision DIRECT →",
-                    decision["action"],
-                    "ARGS=",
-                    decision["args"],
-                    "skip Decision LLM"
-                )
-
-            elif deterministic_search:
-                decision = {
-                    "allowed": True,
-                    "action": "SEARCH",
-                    "args": "",
-                    "task_control": "CONTINUE_STEP",
-                    "actions": []
-                }
-            elif deterministic_phase_action:
-                decision = {
-                    "allowed": True,
-                    "action": deterministic_phase_action,
-                    "args": "",
-                    "task_control": "CONTINUE_STEP",
-                    "actions": []
-                }
-            elif self.state.get("phase") == "ANALYZE":
-                # V6.23：ANALYZE 已由 Python 确定性生成 analyze_code，
-                # 不再把内部工具协议送入 Decision Layer。
-                decision = {
-                    "allowed": True,
-                    "action": "ANALYZE",
-                    "args": ""
-                }
-            else:
-                decision = self.decision_step(
-                    response
-                )
-
-            if not decision.get("allowed", False):
-                reason = (
-                    decision.get("validation_reason", "")
-                    or decision.get("reason", "")
-                )
-                print("V6.20 safety rejected:", reason)
-
-                # V6.20：明确的观察-only任务在观察完成后，
-                # 若下一动作违反原始任务禁止条件，则任务已经达到
-                # “观察并根据结果完成”的安全边界，直接结束。
-                original_task = str(self.state.get("question", ""))
-                observation_only = (
-                    self.state.get("computer_observe_done")
-                    and any(
-                        x in original_task
-                        for x in ("禁止点击", "禁止输入", "禁止修改")
-                    )
-                )
-
-                if observation_only:
-                    print("V6.20 observation-only task complete")
-                    break
-
-                continue
+            decision = self.decision_step(
+                response
+            )
 
             self.state["last_action"] = decision.get(
                 "action",
                 ""
             )
-            self.state["decision_args"] = decision.get(
-                "args",
-                ""
-            )
 
             print(
-                "V6.28.6 Decision:",
+                "V6.6 Decision:",
                 decision
             )
-
-            # V6.11 COMPUTER Decision Gate：
-            # GPT Decision Layer 直接控制真实桌面工具。
-            computer_tools = {
-                "MOUSE_MOVE": "mouse_move",
-                "MOUSE_CLICK": "mouse_click",
-                "KEYBOARD_TYPE": "keyboard_type",
-                "KEYBOARD_PRESS": "keyboard_press",
-                "WINDOW_LIST": "window_list",
-                "WINDOW_ACTIVATE": "window_activate",
-                "OBSERVE_WINDOW": "observe_window_tool",
-                "BROWSER_STATE": "browser_state",
-                "BROWSER_TEXT": "browser_text_tool",
-                "BROWSER_ELEMENTS": "browser_elements_tool",
-                "BROWSER_CLICK_TEXT": "browser_click_text_tool",
-                "CLICK_TEXT_LOCAL": "click_text_local",
-            }
-
-            decision_action = str(
-                decision.get("action", "")
-            ).strip().upper()
-
-            # V6.12：一次 Decision 返回多个 COMPUTER 动作时，
-            # 第一动作立即执行，其余动作进入队列，避免每个动作都重新调用 LLM。
-            decision_actions = decision.get("actions", [])
-            if (
-                decision.get("allowed", False)
-                and decision_action in computer_tools
-                and isinstance(decision_actions, list)
-                and len(decision_actions) > 1
-            ):
-                valid_queue = []
-                for item in decision_actions[1:]:
-                    # V6.28.2：
-                    # deterministic_computer_action() 使用协议大写键
-                    # ACTION / ARGS / REASON；
-                    # Decision LLM 旧协议可能使用小写键。
-                    # 两种格式统一兼容，避免确定性 ACTIONS 丢失。
-                    action_name = str(
-                        item.get("ACTION", item.get("action", ""))
-                    ).strip().upper()
-
-                    if action_name in computer_tools or action_name == "DONE":
-                        valid_queue.append({
-                            "ACTION": action_name,
-                            "ARGS": str(
-                                item.get("ARGS", item.get("args", ""))
-                            ).strip(),
-                            "REASON": str(
-                                item.get("REASON", item.get("reason", ""))
-                            ),
-                            "TASK_CONTROL": (
-                                "DONE"
-                                if action_name == "DONE"
-                                else "CONTINUE_STEP"
-                            )
-                        })
-                    else:
-                        break
-
-                self.state["computer_action_queue"] = valid_queue
-
-                print(
-                    "V6.12 COMPUTER Queue:",
-                    len(valid_queue),
-                    "actions"
-                )
-
-            if (
-                decision.get("allowed", False)
-                and decision_action in computer_tools
-            ):
-                # V6.28.2：
-                # COMPUTER 队列中的后续动作不能覆盖最初的返回阶段。
-                # 只有从非-COMPUTER 阶段首次进入 COMPUTER 时，
-                # 才记录 computer_return_phase。
-                if self.state.get("phase") != "COMPUTER":
-                    self.state["computer_return_phase"] = self.state.get(
-                        "phase",
-                        "ANALYZE"
-                    )
-
-                self.state["phase"] = "COMPUTER"
-                tool = computer_tools[decision_action]
-                args = str(
-                    decision.get("args", "")
-                ).strip()
-
-                if tool == "browser_state":
-                    args = {}
-
-                print(
-                    "V6.11 COMPUTER:",
-                    decision_action,
-                    "->",
-                    tool,
-                    "ARGS=",
-                    args
-                )
-
-            elif (
-                decision.get("allowed", False)
-                and decision_action == "VERIFY_RESULT"
-            ):
-                self.state["phase"] = "VERIFY_RESULT"
-                print(
-                    "V6.11 Decision: GPT 已选择 VERIFY_RESULT"
-                )
-                continue
-
-            else:
-                tool, args = self.extract_tool(
-                    response
-                )
 
             # V6.6 ANALYZE Decision Gate:
             # GPT 决定 VERIFY 后，立即切换状态并结束本轮。
@@ -5459,7 +3796,6 @@ path
             if (
                 self.state["phase"] == "ANALYZE"
                 and decision.get("allowed", False)
-                and decision.get("action") != "ANALYZE"
             ):
                 if decision.get("action") == "VERIFY":
                     self.state["phase"] = "VERIFY"
@@ -5475,10 +3811,9 @@ path
                 continue
 
 
-            # V6.11：
-            # COMPUTER ACTION 已在上面的 Decision Gate 中完成
-            # ACTION -> tool/args 映射，不再重复解析。
-            # 其他 ACTION 继续使用原有 extract_tool()。
+            tool, args = self.extract_tool(
+                response
+            )
 
             # V6.1.5:
             # SEARCH 阶段由状态机强制执行 search_code_index。
@@ -5700,18 +4035,32 @@ path
                     )
 
                     if self.state["target_file"]:
+
                         args = (
                             self.state["target_file"]
                             + "|1|100"
                         )
+
                     else:
+
                         print(
                             "V5.18: 没有有效 target_file，拒绝本次读取"
                         )
-                        self.state["decision_request"] = self.build_decision_request(
-                            observation="READ 被安全层拒绝：没有有效 target_file"
-                        )
-                        continue
+
+                        # V6.6: READ 结果进入下一轮 GPT Decision Request
+                self.state["decision_request"] = (
+                    self.build_decision_request(
+                        observation
+                    )
+                )
+
+                print(
+                    "V6.6 READ Decision Request 已刷新:",
+                    len(self.state["decision_request"]),
+                    "chars"
+                )
+
+                continue
 
             # V4.9.2：
             # READ 阶段允许连续读取多个候选文件。
@@ -5762,153 +4111,8 @@ path
                 "chars"
             )
 
-
-            # V6.20：确定性 GUI 观察完成后直接闭环。
-            # V6.11 COMPUTER：真实桌面工具执行完成后，
-            # 将真实结果立即交回 GPT Decision Layer。
-            computer_tool_names = {
-                "mouse_move",
-                "mouse_click",
-                "keyboard_type",
-                "keyboard_press",
-                "window_list",
-                "window_activate",
-                "observe_window_tool",
-                "browser_state",
-                "browser_text_tool",
-                "browser_elements_tool",
-                "browser_click_text_tool",
-                "click_text_local"
-            }
-
-            if tool in computer_tool_names:
-
-                self.state["previous_step_result"] = str(result)
-
-                # V6.28.4：
-                # 当前 Queue direct-dispatch 已完成。
-                # 标记只属于当前一次 dispatch，立即清除。
-                self.state["computer_queue_direct_dispatch"] = False
-
-                # V6.28.3：
-                # 确定性 COMPUTER 任务只有在每一个真实工具调用
-                # 都返回有效结果后才能直接完成。
-                if self.state.get("deterministic_local_click"):
-                    if result is None:
-                        self.state["deterministic_local_click_failed"] = True
-                        print(
-                            "V6.29-R3.3-C LOCAL TEXT CLICK failed"
-                        )
-
-                if self.state.get("deterministic_computer_task"):
-                    if result is None:
-                        self.state["deterministic_computer_failed"] = True
-                        print(
-                            "V6.28.3 COMPUTER deterministic action failed"
-                        )
-
-                # V6.28.2：
-                # 确定性 COMPUTER 动作队列必须连续执行。
-                # 队列还有动作时，不返回 GPT，不重新决策。
-                if self.state.get("computer_action_queue"):
-                    self.state["phase"] = "COMPUTER"
-                    print(
-                        "V6.28.6 COMPUTER Queue remaining →",
-                        len(self.state["computer_action_queue"]),
-                        "actions, direct dispatch, skip Decision Layer"
-                    )
-                    continue
-
-                # 当前 COMPUTER 动作序列已经全部执行完毕。
-                #
-                # V6.28.3：
-                # 如果整个任务本身就是用户明确给出的确定性 COMPUTER
-                # 动作序列，那么这里已经达到任务完成条件。
-                #
-                # 例如：
-                #   点击坐标 -> 输入文本 -> Enter
-                #
-                # 不再：
-                #   COMPUTER -> ANALYZE -> VERIFY -> LLM
-                #
-                # 这样可以保证确定性 GUI 指令真正做到零额外 LLM。
-                if (
-                    self.state.get("deterministic_computer_task")
-                    and not self.state.get("deterministic_computer_failed")
-                    and self.is_pure_computer_task(question)
-                ):
-                    self.state["deterministic_computer_consumed"] = False
-                    self.state["task_complete"] = True
-                    self.state["task_completed"] = True
-                    self.state["phase"] = "SUMMARY"
-
-                    self.state["decision_request"] = (
-                        self.build_decision_request(
-                            observation=(
-                                "COMPUTER 确定性动作序列已经全部真实执行成功。"
-                                "用户显式要求的桌面动作已经完成。"
-                                "无需继续分析项目或调用 LLM。"
-                            )
-                        )
-                    )
-
-                    print(
-                        "V6.28.3 COMPUTER deterministic task COMPLETE"
-                    )
-                    print(
-                        "V6.28.3 COMPUTER actions finished:",
-                        "no further LLM"
-                    )
-
-                    break
-
-                # V6.29-R3.3-C：
-                # 本地文字点击成功后，纯 COMPUTER 任务直接完成。
-                if (
-                    self.state.get("deterministic_local_click")
-                    and not self.state.get(
-                        "deterministic_local_click_failed"
-                    )
-                    and self.is_pure_computer_task(question)
-                ):
-                    self.state["task_complete"] = True
-                    self.state["task_completed"] = True
-                    self.state["deterministic_computer_consumed"] = False
-                    self.state["phase"] = "SUMMARY"
-
-                    print(
-                        "V6.29-R3.3-C LOCAL TEXT CLICK COMPLETE:",
-                        "no Decision LLM"
-                    )
-
-                    break
-
-                # 非确定性 COMPUTER 任务保持 V6.28.2 原行为。
-                # 清除一次性解析锁，允许未来新的 COMPUTER step
-                # 再次解析新的显式桌面命令。
-                self.state["deterministic_computer_consumed"] = False
-
-                self.state["phase"] = self.state.get(
-                    "computer_return_phase",
-                    "ANALYZE"
-                )
-
-                self.state["decision_request"] = (
-                    self.build_decision_request(
-                        observation=(
-                            "COMPUTER 工具已真实执行完成。"
-                            "确定性动作队列已经全部执行。"
-                            "请根据真实执行结果继续决定下一步 ACTION。"
-                        )
-                    )
-                )
-
-                print(
-                    "V6.28.2 COMPUTER Result → next state:",
-                    self.state["phase"]
-                )
-
-                continue
+            print("DEBUG tool returned:", type(result))
+            print("DEBUG result length:", len(str(result)))
 
             if tool == "read_file_chunk":
 
@@ -6164,17 +4368,8 @@ path
                         analysis_prompt = f"""
 请根据用户明确提出的修改要求，检查下面提供的 Python 源码。
 
-完整原始任务:
-{self.state.get("original_task", self.state.get("question", ""))}
-
-当前步骤:
-{self.state.get("current_step_id", "STEP-001")}
-
-当前步骤要求:
-{self.state.get("current_step_requirement", "")}
-
-上一步真实结果:
-{self.state.get("previous_step_result", "")}
+用户要求:
+{self.state.get("question", "")}
 
 源码:
 {analysis_source}
@@ -6183,20 +4378,7 @@ path
 
 你的唯一判断目标是：
 
-当前真实源码是否已经满足“当前步骤要求”。
-
-重要规则：
-
-1. ORIGINAL_TASK 只是整个任务的上下文，不能把尚未进入的后续步骤当成当前步骤的问题。
-2. CURRENT_STEP_REQUIREMENT 是本轮唯一的源码功能判断目标。
-3. 如果 CURRENT_STEP_REQUIREMENT 为空，这是第一个步骤；请根据 ORIGINAL_TASK 选择最小、最先需要完成的一个功能增量作为本轮目标。
-4. 本轮只处理当前步骤，不要提前实现后续步骤。
-5. 当前步骤真实验证通过后，由 GPT Decision Layer 决定是否进入下一步骤。
-6. 不要因为 ORIGINAL_TASK 中存在“继续下一步”“多轮执行”等编排要求，就认为目标 Python 文件必须实现这些 Agent 行为。
-
-你的唯一判断目标仍然是：
-
-当前真实源码是否已经满足当前步骤要求。
+当前真实源码是否已经满足用户明确提出的“源码功能要求”。
 
 特别重要：
 
@@ -6239,8 +4421,8 @@ path
 需求满足: NO
 
 其中：
-- YES = 当前真实源码已经满足当前步骤要求。
-- NO = 当前步骤要求至少有一项没有满足。
+- YES = 当前真实源码已经满足用户的全部明确要求。
+- NO = 当前真实源码至少有一项明确要求没有满足。
 
 如果源码不满足用户要求，必须认定为明确问题。
 
@@ -6540,93 +4722,6 @@ Python 审查:
                     decision
                 )
 
-                # V6 长任务控制：记录 GPT 对当前步骤的控制意图。
-                task_control = decision.get(
-                    "task_control",
-                    "CONTINUE_STEP"
-                )
-                self.state["task_control"] = task_control
-
-                print(
-                    "V6 TASK CONTROL:",
-                    task_control,
-                    "STEP:",
-                    self.state.get("current_step_id", "")
-                )
-
-                # V6 最终完成安全门：
-                # GPT 不能单方面宣布 DONE。
-                # 必须存在真实的 VERIFY_RESULT，并且验证明确通过。
-                if task_control == "DONE":
-                    final_verify_ok = (
-                        self.state.get("verify_result_done", False)
-                        and self.state.get("verify_result_passed", False)
-                    )
-
-                    if not final_verify_ok:
-                        print(
-                            "V6 DONE REJECTED:",
-                            "真实最终验证尚未通过"
-                        )
-                        self.state["task_control"] = "CONTINUE_STEP"
-                        task_control = "CONTINUE_STEP"
-                    else:
-                        self.state["task_control"] = "DONE"
-                        self.state["summary_done"] = True
-                        self.state["phase"] = "SUMMARY"
-                        print("V6 DONE VERIFIED → 任务完成")
-                        return
-
-                # V6 长任务安全门：
-                # 只有真实 VERIFY_RESULT 通过，才允许 GPT 推进下一步骤。
-                if (
-                    task_control == "NEXT_STEP"
-                    and self.state.get("verify_result_passed", False)
-                ):
-                    current_step = str(
-                        self.state.get("current_step_id", "STEP-001")
-                    )
-                    try:
-                        step_number = int(
-                            current_step.rsplit("-", 1)[1]
-                        )
-                    except Exception:
-                        step_number = 1
-
-                    next_step = "STEP-" + str(
-                        step_number + 1
-                    ).zfill(3)
-
-                    self.state["previous_step_result"] = str(
-                        self.state.get("verify_result", "")
-                    )
-                    self.state["current_step_id"] = next_step
-                    self.state["current_step_requirement"] = str(
-                        decision.get("next_step_requirement", "")
-                    ).strip()
-                    self.state["search_done"] = False
-                    self.state["read_done"] = False
-                    self.state["read_index"] = 0
-                    self.state["analyze_done"] = False
-                    self.state["analysis_result"] = ""
-                    self.state["problem_confirmed"] = False
-                    self.state["modify_plan_done"] = False
-                    self.state["plan_verify_passed"] = False
-                    self.state["verify_done"] = False
-                    self.state["verify_result_done"] = False
-                    self.state["verify_result_passed"] = False
-                    self.state["summary_done"] = False
-                    print("V6 DEBUG NEXT_STEP_PHASE_BEFORE_RESET:", self.state.get("phase"))
-                    self.state["phase"] = "SEARCH"
-
-                    print(
-                        "V6 NEXT_STEP:",
-                        current_step,
-                        "->",
-                        next_step
-                    )
-                    continue
-
                 # V6.6：ACTION 正式成为状态推进门控。
                 # ANALYZE 阶段只能接受 VERIFY。
                 if not decision.get("allowed", False):
@@ -6912,19 +5007,9 @@ Python 审查:
                             "V6.1.9 SEARCH 无结果，停止重复搜索"
                         )
 
-                        self.state["previous_step_result"] = (
-                            "SEARCH 无结果。没有找到代码搜索结果，"
-                            "但不能据此判定原始任务完成。"
-                        )
-                        self.state["decision_request"] = (
-                            self.build_decision_request(
-                                observation=(
-                                    "SEARCH 工具真实执行完成，但没有搜索结果。"
-                                    "请根据 ORIGINAL_TASK 继续决定下一步，"
-                                    "不要假设任务已完成。"
-                                )
-                            )
-                        )
+                        self.state["summary_done"] = True
+                        self.state["phase"] = "SUMMARY"
+
                         continue
 
 

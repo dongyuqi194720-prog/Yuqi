@@ -5777,8 +5777,7 @@ path
                 "browser_state",
                 "browser_text_tool",
                 "browser_elements_tool",
-                "browser_click_text_tool",
-                "click_text_local"
+                "browser_click_text_tool"
             }
 
             if tool in computer_tool_names:

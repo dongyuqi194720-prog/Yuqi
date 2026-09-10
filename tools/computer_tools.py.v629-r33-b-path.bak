@@ -1,7 +1,6 @@
 from langchain_core.tools import tool
 import os
 import subprocess
-from pathlib import Path
 from tools.gui_observer import observe_window
 from tools.vision_gateway import vision_observe
 from tools.ocr_observer import observe_text_boxes
