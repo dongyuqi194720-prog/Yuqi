@@ -5863,11 +5863,50 @@ path
                         )
 
                 if self.state.get("deterministic_computer_task"):
-                    if result is None:
+                    result_text = "" if result is None else str(result)
+                    computer_failure_prefixes = (
+                        "鼠标移动失败:",
+                        "鼠标点击失败:",
+                        "键盘输入失败:",
+                        "按键失败:",
+                        "窗口列表获取失败:",
+                        "窗口激活失败:",
+                        "窗口观察失败:",
+                        "CLICK_TEXT_LOCAL_FAILED:",
+                    )
+                    if (
+                        result is None
+                        or any(
+                            result_text.startswith(prefix)
+                            for prefix in computer_failure_prefixes
+                        )
+                    ):
                         self.state["deterministic_computer_failed"] = True
                         print(
-                            "V6.28.3 COMPUTER deterministic action failed"
+                            "V6.30-R2-1 COMPUTER deterministic action failed:",
+                            result_text
                         )
+
+                # V6.30-R2-1：
+                # deterministic COMPUTER 任一真实工具失败后，
+                # 必须立即终止剩余 queue，不得继续执行后续动作，
+                # 也不得重新进入 Decision LLM。
+                if (
+                    self.state.get("deterministic_computer_task")
+                    and self.state.get("deterministic_computer_failed")
+                ):
+                    self.state["computer_action_queue"] = []
+                    self.state["deterministic_computer_consumed"] = False
+                    self.state["phase"] = "SUMMARY"
+
+                    print(
+                        "V6.30-R2-1 COMPUTER Queue STOP: deterministic action failed"
+                    )
+                    print(
+                        "V6.30-R2-1 COMPUTER Queue STOP: no further actions, no Decision LLM"
+                    )
+
+                    break
 
                 # V6.28.2：
                 # 确定性 COMPUTER 动作队列必须连续执行。
