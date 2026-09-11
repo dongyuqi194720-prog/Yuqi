@@ -78,10 +78,27 @@ def inspect_process(pid):
 def find_window(query):
     """Find the active matching GUI window, then fall back to the first match."""
     query = str(query).strip().lower()
-    if not query:
-        return None
 
-    core_name = query.split()[0]
+    core_name = query.split()[0] if query else ""
+
+    browser_markers = (
+        "browser",
+        "chromium",
+        "chrome",
+        "firefox",
+        "qaxbrowser",
+        "qaxbrowser-safe",
+        "可信浏览器",
+        "浏览器",
+    )
+
+    def is_browser(window):
+        text = (
+            window["title"].lower()
+            + " "
+            + window["wm_class"].lower()
+        )
+        return any(marker in text for marker in browser_markers)
     if core_name in {"web", "browser", "application"}:
         core_name = query
 
@@ -94,12 +111,20 @@ def find_window(query):
         )
 
     active = get_active_window()
-    if active and matches(active):
-        return active
+    if active:
+        if query and matches(active):
+            return active
+        if not query and is_browser(active):
+            return active
 
     for window in list_windows():
-        if matches(window):
+        if query and matches(window):
             return window
+
+    if not query:
+        for window in list_windows():
+            if is_browser(window):
+                return window
 
     return None
 

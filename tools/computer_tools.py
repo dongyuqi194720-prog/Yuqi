@@ -270,7 +270,7 @@ def window_activate(window_id: str):
 
 
 @tool
-def click_text_local(target: str, window_query: str = "Chromium"):
+def click_text_local(target: str, window_query: str = "browser"):
     """
     V6.29-R3.3-B：
     本地 OCR 文字定位 → 窗口坐标转换 → 桌面绝对坐标点击。
@@ -282,7 +282,7 @@ def click_text_local(target: str, window_query: str = "Chromium"):
 
     try:
         target = str(target).strip()
-        window_query = str(window_query).strip() or "Chromium"
+        window_query = str(window_query).strip()
 
         if not target:
             return "CLICK_TEXT_LOCAL_FAILED: empty target"
