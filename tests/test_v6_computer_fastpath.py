@@ -155,7 +155,7 @@ def test_v630_r2_runtime_failure_stops_queue_and_skips_llm():
         '输入“https://example.com”，然后按 Enter'
     )
 
-    agent.run(question)
+    agent.run(question, resume=True)
 
     assert fake_controller.calls == [
         ("keyboard_press", "Ctrl+L"),
@@ -166,6 +166,100 @@ def test_v630_r2_runtime_failure_stops_queue_and_skips_llm():
 
     assert llm_calls == [], (
         "R2-1 violation: ask_llm was called: "
+        f"{llm_calls}"
+    )
+
+    assert agent.state["deterministic_computer_failed"] is True
+    assert agent.state["computer_action_queue"] == []
+    assert agent.state["phase"] == "SUMMARY"
+    assert agent.state["task_complete"] is False
+    assert agent.state.get("task_completed", False) is False
+
+def test_v630_r2_2_window_activate_fullwidth_colon_failure_is_propagated():
+    """V6.30-R2-2: window_activate fullwidth-colon failure must stop deterministic COMPUTER."""
+    source = SOURCE.read_text(encoding="utf-8")
+
+    marker = 'if self.state.get("deterministic_computer_task"):'
+    start = source.index(marker)
+    block = source[start:start + 1200]
+
+    assert "窗口激活失败：" in block, (
+        "V6.30-R2-2 gap: fullwidth-colon window_activate failure "
+        "is not propagated"
+    )
+
+def test_v630_r2_2_runtime_fullwidth_colon_failure_stops_queue_and_skips_llm():
+    """V6.30-R2-2 runtime: fullwidth-colon window failure must stop deterministic COMPUTER queue."""
+    mod = load_agent_module()
+
+    class FakeLLM:
+        pass
+
+    class FakeRouter:
+        pass
+
+    class FakeController:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, tool, args):
+            self.calls.append((tool, args))
+
+            if len(self.calls) == 1:
+                return "窗口激活失败：未找到窗口 Chromium"
+
+            return "UNEXPECTED_SECOND_ACTION_EXECUTED"
+
+    agent = mod.AutonomousAgent(
+        FakeLLM(),
+        FakeRouter(),
+    )
+
+    fake_controller = FakeController()
+    agent.controller = fake_controller
+
+    llm_calls = []
+
+    def fake_ask_llm(*args, **kwargs):
+        llm_calls.append((args, kwargs))
+        raise AssertionError(
+            "R2-2 violation: Decision LLM was called after deterministic COMPUTER failure"
+        )
+
+    agent.ask_llm = fake_ask_llm
+
+    question = (
+        '请激活窗口“Chromium”，然后按 Enter'
+    )
+
+    agent.state["task_mode"] = "REVIEW"
+    agent.state["phase"] = "COMPUTER"
+    agent.state["deterministic_computer_task"] = True
+    agent.state["deterministic_computer_consumed"] = True
+    agent.state["computer_action_queue"] = [
+        {
+            "ACTION": "WINDOW_ACTIVATE",
+            "ARGS": "Chromium",
+            "REASON": "explicit deterministic action",
+        },
+        {
+            "ACTION": "KEYBOARD_PRESS",
+            "ARGS": "Enter",
+            "REASON": "explicit deterministic action",
+        },
+    ]
+
+    agent.run(question, resume=True)
+
+    assert fake_controller.calls == [
+        ("window_activate", "Chromium"),
+    ], (
+        "R2-2 violation: queue continued after fullwidth-colon failure: "
+        f"{fake_controller.calls}"
+    )
+
+    assert llm_calls == [], (
+        "R2-2 violation: ask_llm was called: "
         f"{llm_calls}"
     )
 
