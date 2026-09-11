@@ -1210,13 +1210,6 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             return None
 
         if not re.search(
-            r"(?:找到|找出|定位|寻找|find|locate)",
-            text,
-            re.IGNORECASE
-        ):
-            return None
-
-        if not re.search(
             r"(?:点击|单击|按一下|click)",
             text,
             re.IGNORECASE
@@ -1234,6 +1227,7 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
         target = None
 
         patterns = [
+            # “找到/定位……并点击”
             r"(?:找到|找出|定位|寻找|find|locate)"
             r"\s*[“\"「『]([^”\"」』]+)[”\"」』]"
             r"\s*(?:文字|文本|字样)?"
@@ -1247,6 +1241,12 @@ NEXT_STEP_REQUIREMENT: 如果 TASK_COMPLETE=NO，给出下一轮最小、明确�
             r"(?:找到|找出|定位|寻找|find|locate)"
             r"\s+(.+?)"
             r"\s*(?:并|然后)\s*(?:点击|单击|按一下|click)",
+
+            # V6.29-R3.3 direct text click：
+            # “请点击‘添加’” / “点击“添加””
+            r"(?:点击|单击|按一下|click)"
+            r"\s*[“\"「『]([^”\"」』]+)[”\"」』]"
+            r"\s*(?:文字|文本|字样|按钮|入口|链接)?",
         ]
 
         for pattern in patterns:
