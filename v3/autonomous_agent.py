@@ -5862,6 +5862,19 @@ path
                             "V6.29-R3.3-C LOCAL TEXT CLICK failed"
                         )
 
+                # V6.29-R3.3-J：本地文字点击失败后立即结束
+                if self.state.get("deterministic_local_click_failed"):
+                    self.state["task_complete"] = True
+                    self.state["task_completed"] = True
+                    self.state["deterministic_computer_consumed"] = False
+                    self.state["phase"] = "SUMMARY"
+
+                    print(
+                        "V6.29-R3.3-J GUI TARGET NOT FOUND → task complete"
+                    )
+
+                    break
+
                 if self.state.get("deterministic_computer_task"):
                     result_text = "" if result is None else str(result)
                     computer_failure_prefixes = (
