@@ -2728,7 +2728,12 @@ SUMMARY
             else "REVIEW"
         )
 
-        if computer_task:
+        deterministic_computer_task = (
+            self.is_pure_computer_task(question)
+            and self.deterministic_computer_action(question)
+        )
+
+        if computer_task or deterministic_computer_task:
             self.state["task_mode"] = "REVIEW"
             self.state["phase"] = "COMPUTER"
 
