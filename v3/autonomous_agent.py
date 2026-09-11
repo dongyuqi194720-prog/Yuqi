@@ -5846,7 +5846,12 @@ path
                 # 确定性 COMPUTER 任务只有在每一个真实工具调用
                 # 都返回有效结果后才能直接完成。
                 if self.state.get("deterministic_local_click"):
-                    if result is None:
+                    if (
+                        result is None
+                        or str(result).startswith("CLICK_TEXT_LOCAL_NOT_FOUND:")
+                        or str(result).startswith("CLICK_TEXT_LOCAL_FAILED:")
+                        or "x=0, y=0" in str(result)
+                    ):
                         self.state["deterministic_local_click_failed"] = True
                         print(
                             "V6.29-R3.3-C LOCAL TEXT CLICK failed"
@@ -5935,10 +5940,69 @@ path
 
                     break
 
+                # V6.29-R3.3-C：
+                # 本地 OCR 找到并点击成功属于确定性完成，
+                # 直接结束任务，不再进入 Decision LLM。
+                if (
+                    self.state.get("deterministic_local_click")
+                    and str(result).startswith("CLICK_TEXT_LOCAL_OK:")
+                    and self.is_pure_computer_task(question)
+                ):
+                    self.state["task_complete"] = True
+                    self.state["task_completed"] = True
+                    self.state["deterministic_local_click_failed"] = False
+                    self.state["phase"] = "SUMMARY"
+
+                    print(
+                        "V6.29-R3.3-C LOCAL TEXT CLICK COMPLETE: deterministic success"
+                    )
+
+                    break
+
                 # V6.29-R3.3-F：
                 # 纯 COMPUTER / GUI 任务的非确定性动作完成后，
                 # 必须继续留在 COMPUTER，由下一轮 Decision LLM
                 # 根据真实 GUI 结果决定下一步。
+                #
+                # V6.29-R3.3-J：
+                # deterministic local click 已明确失败时，
+                # 不得再次进入 COMPUTER / CLICK_TEXT_LOCAL 循环。
+                if (
+                    self.state.get("deterministic_local_click")
+                    and self.state.get("deterministic_local_click_failed")
+                    and self.is_pure_computer_task(question)
+                ):
+                    self.state["task_complete"] = True
+                    self.state["task_completed"] = True
+                    self.state["deterministic_computer_consumed"] = False
+                    self.state["phase"] = "SUMMARY"
+
+                    print(
+                        "V6.29-R3.3-J GUI TARGET NOT FOUND → task complete"
+                    )
+
+                    break
+                #
+                # V6.29-R3.3-I：
+                # 如果 Decision LLM 已明确判断目标不存在，
+                # 不得把“找不到目标”继续当作 CONTINUE_STEP，
+                # 否则会形成 MOUSE_MOVE/COMPUTER 无限循环。
+                if (
+                    self.is_pure_computer_task(question)
+                    and "找不到指定文字" in str(
+                        self.state.get("decision_request", "")
+                    )
+                ):
+                    self.state["task_complete"] = True
+                    self.state["task_completed"] = True
+                    self.state["phase"] = "SUMMARY"
+
+                    print(
+                        "V6.29-R3.3-I GUI TARGET NOT FOUND → task complete"
+                    )
+
+                    break
+
                 if self.is_pure_computer_task(question):
                     self.state["deterministic_computer_consumed"] = False
                     self.state["phase"] = "COMPUTER"

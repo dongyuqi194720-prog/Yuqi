@@ -2,7 +2,7 @@ from langchain_core.tools import tool
 import os
 import subprocess
 from pathlib import Path
-from tools.gui_observer import observe_window
+from tools.gui_observer import observe_window, capture_window
 from tools.vision_gateway import vision_observe
 from tools.ocr_observer import observe_text_boxes
 
@@ -295,6 +295,36 @@ def click_text_local(target: str, window_query: str = "Chromium"):
                 f"window not found: {window_query}"
             )
 
+        # V6.29-R3.3-C：
+        # OCR 点击前先显式激活目标顶层窗口。
+        window_id = str(window.get("window_id", "")).strip()
+
+        if window_id:
+            result = subprocess.run(
+                ["wmctrl", "-i", "-a", window_id],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if result.returncode != 0:
+                return (
+                    "CLICK_TEXT_LOCAL_FAILED: "
+                    f"window_activate: {result.stderr.strip()}"
+                )
+
+        # 激活后重新截图，确保 OCR 使用的是当前窗口状态。
+        if window_id:
+            screenshot_path = window.get("screenshot")
+            if screenshot_path:
+                try:
+                    Path(screenshot_path).unlink()
+                except OSError:
+                    pass
+
+            capture_window(window_id, "/tmp/v6_window_click.png")
+            window["screenshot"] = "/tmp/v6_window_click.png"
+
         screenshot = window.get("screenshot")
 
         if not screenshot or not Path(screenshot).exists():
@@ -304,14 +334,27 @@ def click_text_local(target: str, window_query: str = "Chromium"):
 
         target_lower = target.lower()
 
-        # 精确匹配优先
+        # ----------------------------------------------------
+        # V6.29-R3.3-D：
+        # OCR 多 box 文本拼接匹配。
+        #
+        # 例如 OCR 可能把：
+        #   添加快捷方式
+        # 拆成：
+        #   添加 / 快捷 / 方式
+        #
+        # 精确匹配和单 box 子串匹配保持优先；
+        # 只有前两者都失败时，才尝试同一行的连续 OCR box。
+        # ----------------------------------------------------
+
+        # 1. 精确匹配优先
         matches = [
             box for box in boxes
             if str(box.get("text", "")).strip().lower()
             == target_lower
         ]
 
-        # 子串匹配 fallback
+        # 2. 单 box 子串匹配 fallback
         if not matches:
             matches = [
                 box for box in boxes
@@ -320,16 +363,161 @@ def click_text_local(target: str, window_query: str = "Chromium"):
                 ).strip().lower()
             ]
 
-        if not matches:
-            return (
-                "CLICK_TEXT_LOCAL_NOT_FOUND: "
-                f"target={target}"
+        if matches:
+            box = matches[0]
+
+            local_x = int(box["center_x"])
+            local_y = int(box["center_y"])
+
+        else:
+            # 3. 多 box 连续文本匹配
+            #
+            # 先过滤空文本，并按视觉阅读顺序排序。
+            valid_boxes = [
+                box for box in boxes
+                if str(box.get("text", "")).strip()
+            ]
+
+            valid_boxes.sort(
+                key=lambda b: (
+                    int(b.get("y", b.get("center_y", 0))),
+                    int(b.get("x", b.get("center_x", 0))),
+                )
             )
 
-        box = matches[0]
+            combined_match = None
 
-        local_x = int(box["center_x"])
-        local_y = int(box["center_y"])
+            for start_index, start_box in enumerate(valid_boxes):
+                start_text = str(
+                    start_box.get("text", "")
+                ).strip()
+
+                if not start_text:
+                    continue
+
+                current_text = start_text.lower()
+                group = [start_box]
+
+                if target_lower.startswith(current_text):
+                    for next_box in valid_boxes[start_index + 1:]:
+                        prev = group[-1]
+
+                        prev_x = int(prev.get(
+                            "x", prev.get("center_x", 0)
+                        ))
+                        prev_y = int(prev.get(
+                            "y", prev.get("center_y", 0)
+                        ))
+                        prev_w = int(prev.get(
+                            "width", 0
+                        ))
+                        prev_h = int(prev.get(
+                            "height", 0
+                        ))
+
+                        next_x = int(next_box.get(
+                            "x", next_box.get("center_x", 0)
+                        ))
+                        next_y = int(next_box.get(
+                            "y", next_box.get("center_y", 0)
+                        ))
+
+                        next_text = str(
+                            next_box.get("text", "")
+                        ).strip()
+
+                        if not next_text:
+                            continue
+
+                        # 必须基本处于同一视觉行。
+                        y_tolerance = max(
+                            12,
+                            min(prev_h, int(
+                                next_box.get("height", 0)
+                            )) + 4,
+                        )
+
+                        if abs(next_y - prev_y) > y_tolerance:
+                            break
+
+                        # 必须从左到右，允许 OCR box 有少量间隙。
+                        gap = next_x - (prev_x + prev_w)
+
+                        if gap > 40:
+                            break
+
+                        candidate = (
+                            current_text
+                            + next_text.lower()
+                        )
+
+                        # 当前拼接结果已经不可能成为目标前缀。
+                        if not target_lower.startswith(candidate):
+                            break
+
+                        group.append(next_box)
+                        current_text = candidate
+
+                        if current_text == target_lower:
+                            combined_match = group
+                            break
+
+                    if combined_match:
+                        break
+
+            if not combined_match:
+                return (
+                    "CLICK_TEXT_LOCAL_NOT_FOUND: "
+                    f"target={target}"
+                )
+
+            # 使用整个 OCR 文本区域的包围盒中心点击。
+            left = min(
+                int(b.get("x", b.get("center_x", 0)))
+                for b in combined_match
+            )
+            top = min(
+                int(b.get("y", b.get("center_y", 0)))
+                for b in combined_match
+            )
+            right = max(
+                int(b.get("x", b.get("center_x", 0)))
+                + int(b.get("width", 0))
+                for b in combined_match
+            )
+            bottom = max(
+                int(b.get("y", b.get("center_y", 0)))
+                + int(b.get("height", 0))
+                for b in combined_match
+            )
+
+            local_x = (left + right) // 2
+            local_y = (top + bottom) // 2
+
+            box = {
+                "confidence": min(
+                    float(b.get("confidence", 0.0))
+                    for b in combined_match
+                ),
+                "text": "".join(
+                    str(b.get("text", "")).strip()
+                    for b in combined_match
+                ),
+            }
+
+            print(
+                "V6.29-R3.3-D MULTI-BOX MATCH:",
+                "target=",
+                target,
+                "boxes=",
+                len(combined_match),
+                "text=",
+                box["text"],
+                "local=",
+                f"({local_x},{local_y})",
+                "confidence=",
+                box["confidence"],
+            )
 
         window_x = int(window.get("x", 0))
         window_y = int(window.get("y", 0))

@@ -76,7 +76,7 @@ def inspect_process(pid):
 
 
 def find_window(query):
-    """Find the first GUI window whose title or WM_CLASS matches query."""
+    """Find the active matching GUI window, then fall back to the first match."""
     query = str(query).strip().lower()
     if not query:
         return None
@@ -85,13 +85,20 @@ def find_window(query):
     if core_name in {"web", "browser", "application"}:
         core_name = query
 
-    for window in list_windows():
-        if (
+    def matches(window):
+        return (
             query in window["title"].lower()
             or query in window["wm_class"].lower()
             or core_name in window["title"].lower()
             or core_name in window["wm_class"].lower()
-        ):
+        )
+
+    active = get_active_window()
+    if active and matches(active):
+        return active
+
+    for window in list_windows():
+        if matches(window):
             return window
 
     return None
