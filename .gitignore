@@ -16,3 +16,11 @@ __pycache__/
 
 # Local test environments
 v5_test/
+
+# Local browser / Codex runtime caches
+.codex_browser/
+.codex_chrome/
+
+# Local browser / Codex runtime caches
+.codex_browser/
+.codex_chrome/
