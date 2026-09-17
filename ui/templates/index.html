@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI Agent</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: sans-serif;
+            background: #f5f6f8;
+            color: #202124;
+        }
+
+        header {
+            padding: 24px 32px;
+            background: white;
+            border-bottom: 1px solid #ddd;
+        }
+
+        main {
+            padding: 32px;
+            max-width: 1100px;
+            margin: auto;
+        }
+
+        .status {
+            padding: 16px;
+            background: white;
+            border-radius: 10px;
+            margin-bottom: 24px;
+        }
+
+        .nav {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+        }
+
+        .card {
+            background: white;
+            padding: 24px;
+            border-radius: 10px;
+            border: 1px solid #ddd;
+        }
+
+        .safe {
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+<header>
+    <h1>AI Agent</h1>
+    <div>安全启动控制台</div>
+</header>
+
+<main>
+    <section class="status">
+        <h2>系统状态</h2>
+        <div class="safe">
+            <span id="system-status">启动状态：检查中...</span>
+        </div>
+        <p>
+            ChatGPT 发送必须经过 Local Agent Marker Gate。
+        </p >
+    </section>
+
+    <section class="nav">
+        <div class="card">
+            <h2>首页</h2>
+            <p>系统状态与运行概览</p >
+        </div>
+
+        <div class="card">
+            <h2>任务</h2>
+            <p>查看和管理 Agent 任务</p >
+        </div>
+
+        <div class="card">
+            <h2>安全中心</h2>
+            <p>Marker Gate 与安全状态</p >
+        </div>
+
+        <div class="card">
+            <h2>日志 / 诊断</h2>
+            <p>启动检查与运行日志</p >
+        </div>
+    </section>
+</main>
+
+<script>
+async function refreshStatus() {
+    const statusEl = document.getElementById("system-status");
+
+    try {
+        const response = await fetch("/api/status", {
+            cache: "no-store"
+        });
+
+        if (!response.ok) {
+            throw new Error("HTTP " + response.status);
+        }
+
+        const data = await response.json();
+
+        const lines = [
+            "系统状态：" + data.status,
+            ...data.checks.map(
+                check => check.name + " = " + check.status
+            )
+        ];
+
+        statusEl.textContent = lines.join(" | ");
+    } catch (error) {
+        statusEl.textContent =
+            "系统状态：STOP | 状态接口不可用";
+    }
+}
+
+refreshStatus();
+setInterval(refreshStatus, 3000);
+</script>
+
+</body>
+</html>
