@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VERSION="$(cat "$ROOT/VERSION" 2>/dev/null || true)"
+case "${1:-}" in
+  --help|-h)
+    echo "Usage: 194720-v7 [OPTIONS]"
+    echo "  --help, -h              Show help"
+    echo "  --version               Show version"
+    echo "  --develop <goal>        Run small-software development loop in current project"
+    echo "  --project-root <path>   Project root for --develop (default: current directory)"
+    echo "  <target>                Run the V7 GUI agent"
+    exit 0
+    ;;
+  --version)
+    echo "${VERSION:-unknown}"
+    exit 0
+    ;;
+  --develop)
+    shift
+    export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+    exec python3 -m v7.software_agent_cli "$@"
+    ;;
+esac
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m v7.agent_v7 "$@"

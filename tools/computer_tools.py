@@ -380,7 +380,7 @@ def click_text_local(target: str, window_query: str = "browser"):
 
             valid_boxes.sort(
                 key=lambda b: (
-                    int(b.get("y", b.get("center_y", 0))),
+                    int(int(b.get("y", b.get("center_y", 0))) // 20),
                     int(b.get("x", b.get("center_x", 0))),
                 )
             )
@@ -443,6 +443,9 @@ def click_text_local(target: str, window_query: str = "browser"):
                         # 必须从左到右，允许 OCR box 有少量间隙。
                         gap = next_x - (prev_x + prev_w)
 
+                        if gap < -10:
+                            continue
+
                         if gap > 40:
                             break
 
@@ -453,7 +456,7 @@ def click_text_local(target: str, window_query: str = "browser"):
 
                         # 当前拼接结果已经不可能成为目标前缀。
                         if not target_lower.startswith(candidate):
-                            break
+                            continue
 
                         group.append(next_box)
                         current_text = candidate
@@ -471,28 +474,57 @@ def click_text_local(target: str, window_query: str = "browser"):
                     f"target={target}"
                 )
 
-            # 使用整个 OCR 文本区域的包围盒中心点击。
-            left = min(
-                int(b.get("x", b.get("center_x", 0)))
-                for b in combined_match
-            )
-            top = min(
-                int(b.get("y", b.get("center_y", 0)))
-                for b in combined_match
-            )
-            right = max(
-                int(b.get("x", b.get("center_x", 0)))
-                + int(b.get("width", 0))
-                for b in combined_match
-            )
-            bottom = max(
-                int(b.get("y", b.get("center_y", 0)))
-                + int(b.get("height", 0))
-                for b in combined_match
-            )
+            # V6.29-R3.3-E GAP ANCHOR：
+            # 多 box 目标优先点击目标内部相邻 OCR box 之间的间隙。
+            # 例如：文件 -> 文|件；同心共育 -> 同心|共育。
+            if len(combined_match) >= 2:
+                ordered = sorted(
+                    combined_match,
+                    key=lambda b: int(b.get("x", b.get("center_x", 0))),
+                )
 
-            local_x = (left + right) // 2
-            local_y = (top + bottom) // 2
+                gaps = []
+                for prev, nxt in zip(ordered, ordered[1:]):
+                    prev_x = int(prev.get("x", prev.get("center_x", 0)))
+                    prev_w = int(prev.get("width", 0))
+                    next_x = int(nxt.get("x", nxt.get("center_x", 0)))
+                    gap = next_x - (prev_x + prev_w)
+
+                    if gap >= 0:
+                        prev_cy = int(prev.get("center_y", 0))
+                        next_cy = int(nxt.get("center_y", 0))
+                        gaps.append((
+                            gap,
+                            (prev_x + prev_w + next_x) // 2,
+                            (prev_cy + next_cy) // 2,
+                        ))
+
+                if gaps:
+                    _, local_x, local_y = max(
+                        gaps,
+                        key=lambda item: item[0],
+                    )
+                else:
+                    left = min(
+                        int(b.get("x", b.get("center_x", 0)))
+                        for b in ordered
+                    )
+                    top = min(
+                        int(b.get("y", b.get("center_y", 0)))
+                        for b in ordered
+                    )
+                    right = max(
+                        int(b.get("x", b.get("center_x", 0)))
+                        + int(b.get("width", 0))
+                        for b in ordered
+                    )
+                    bottom = max(
+                        int(b.get("y", b.get("center_y", 0)))
+                        + int(b.get("height", 0))
+                        for b in ordered
+                    )
+                    local_x = (left + right) // 2
+                    local_y = (top + bottom) // 2
 
             box = {
                 "confidence": min(

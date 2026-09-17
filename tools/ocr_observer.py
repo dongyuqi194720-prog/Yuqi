@@ -5,7 +5,7 @@ import json
 def observe_text(image_path, language="chi_sim+eng"):
     """保留原有 OCR 纯文本接口。"""
     result = subprocess.run(
-        ["tesseract", str(image_path), "stdout", "-l", language],
+        ["tesseract", str(image_path), "stdout", "-l", language, "--psm", "11"],
         capture_output=True,
         text=True,
         check=True,
@@ -25,6 +25,8 @@ def observe_text_boxes(image_path, language="chi_sim+eng"):
             "stdout",
             "-l",
             language,
+            "--psm",
+            "11",
             "tsv",
         ],
         capture_output=True,
