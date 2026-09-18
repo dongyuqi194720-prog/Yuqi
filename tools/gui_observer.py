@@ -148,6 +148,26 @@ def get_active_window():
         None,
     )
 
+def is_chatgpt_active_window():
+    """Return True only when the active X11 window is a ChatGPT browser surface."""
+    active = get_active_window()
+    if not active:
+        return False
+
+    text = (
+        str(active.get("title", "")).lower()
+        + " "
+        + str(active.get("wm_class", "")).lower()
+    )
+
+    markers = (
+        "chatgpt",
+        "chat.openai.com",
+    )
+
+    return any(marker in text for marker in markers)
+
+
 def capture_window(window_id, output_path):
     """Capture an X11 window to an image file."""
     subprocess.run(

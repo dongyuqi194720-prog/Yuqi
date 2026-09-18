@@ -2,7 +2,11 @@ from langchain_core.tools import tool
 import os
 import subprocess
 from pathlib import Path
-from tools.gui_observer import observe_window, capture_window
+from tools.gui_observer import (
+    observe_window,
+    capture_window,
+    is_chatgpt_active_window,
+)
 from tools.vision_gateway import vision_observe
 from tools.ocr_observer import observe_text_boxes
 
@@ -93,6 +97,13 @@ def mouse_move(x: int, y: int):
 @tool
 def mouse_click(button: int = 1, clicks: int = 1):
     """执行系统鼠标点击。button 1=左键，2=中键，3=右键。"""
+    if is_chatgpt_active_window():
+        return (
+            "CHATGPT_MOUSE_CLICK_BLOCKED: "
+            "系统级鼠标点击禁止作用于 ChatGPT；"
+            "发送必须经过 CodexBridge Marker Gate"
+        )
+
     try:
         for _ in range(max(1, clicks)):
             subprocess.run(
@@ -110,6 +121,13 @@ def mouse_click(button: int = 1, clicks: int = 1):
 @tool
 def keyboard_type(text: str):
     """向当前活动窗口输入文本。"""
+    if is_chatgpt_active_window():
+        return (
+            "CHATGPT_TYPE_BLOCKED: "
+            "系统级文本输入禁止作用于 ChatGPT；"
+            "发送必须经过 CodexBridge Marker Gate"
+        )
+
     try:
         subprocess.run(
             ["xdotool", "type", "--clearmodifiers", "--", text],
@@ -126,6 +144,13 @@ def keyboard_type(text: str):
 @tool
 def keyboard_press(key: str):
     """向当前活动窗口发送一个键盘按键，例如 Return、Tab、Escape、ctrl+c。"""
+    if is_chatgpt_active_window():
+        return (
+            "CHATGPT_KEYBOARD_BLOCKED: "
+            "系统级键盘输入禁止作用于 ChatGPT；"
+            "发送必须经过 CodexBridge Marker Gate"
+        )
+
     try:
         subprocess.run(
             ["xdotool", "key", "--clearmodifiers", key],
@@ -587,6 +612,13 @@ def click_text_local(target: str, window_query: str = "browser"):
             return (
                 "CLICK_TEXT_LOCAL_FAILED: "
                 f"mousemove: {result.stderr.strip()}"
+            )
+
+        if is_chatgpt_active_window():
+            return (
+                "CHATGPT_CLICK_BLOCKED: "
+                "系统级鼠标点击禁止作用于 ChatGPT；"
+                "发送必须经过 CodexBridge Marker Gate"
             )
 
         result = subprocess.run(

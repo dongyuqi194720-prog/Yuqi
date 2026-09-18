@@ -3,6 +3,11 @@ import time
 
 from playwright.sync_api import sync_playwright
 
+from ai_agent.gui_safety import (
+    authorize_send,
+    consume_send_authorization,
+)
+
 
 class CodexBridge:
 
@@ -276,6 +281,13 @@ class CodexBridge:
             if marker not in visible_text:
                 raise RuntimeError(
                     "Complete send marker is not visible; sending forbidden"
+                )
+
+            authorize_send(marker)
+
+            if not consume_send_authorization(marker):
+                raise RuntimeError(
+                    "Send authorization missing or marker mismatch; sending forbidden"
                 )
 
             before_assistant_count = messages.count()
